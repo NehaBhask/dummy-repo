@@ -2,18 +2,20 @@
 
 ## Design Submission · Kognivera Hackathon 2026
 
+> **Rev 2** — added a Concurrency Hardening Notes subsection (fixed lock ordering, idempotent upsert via `ON CONFLICT`, connection pooling, explicit `lock_timeout`, isolation-level statement, index check), load-test latency percentiles, and a compensation-failure risk item.
+
 ---
 
 ## 1. Cover
 
 | | |
-|---|---|
+| --- | --- |
 | **Team Name** | *--rebase* |
 | **Problem Statement** | APS-05 — Distributed Booking & Inventory System |
 | **Theme** | Travel & Tourism |
 
 | Member | Role |
-|--------|------|
+| --- | --- |
 | **Thijesh** | Backend Lead — Inventory service, concurrency logic, hold/booking APIs, saga pattern |
 | **Tejas** | Backend + AI — Gemini integration, natural language search, multilingual, API scaffold |
 | **Yogita** | Frontend Lead — React UI, search interface, booking flow, load test dashboard |
@@ -49,14 +51,14 @@ The standout deliverable is not a feature but a **proof**: a load test that fire
 6. **Multi-Item Booking with Saga Compensation** — book hotel + flight together; if one fails, automatically compensate (roll back) the other
 7. **Cancellation with Restock** — cancel a booking and return units to available inventory
 8. **Idempotent APIs** — every hold and booking mutation uses an idempotency key; retries return the existing record
-9. **Load Test Dashboard** — fire N concurrent requests at scarce inventory from within the app; real-time visualization of results proving zero oversell
+9. **Load Test Dashboard** — fire N concurrent requests at scarce inventory from within the app; real-time visualization of results proving zero oversell, including **p50/p95/p99 latency alongside success/failure counts**
 10. **Web UI** — search, hold (with countdown timer), confirm, cancel, and load test flows
 11. **Multilingual Support** — Hindi + English for AI search and core UI labels
 
 ### What We Are Deliberately Leaving Out
 
 | Feature | Why |
-|---------|-----|
+| --- | --- |
 | **Real payment gateway** (Razorpay/Stripe) | A mock payment proves the same transactional flow. Real gateway integration adds 3–4 hours of credential management and webhook handling with zero value for proving concurrency correctness. |
 | **User authentication / sessions** | Not the problem being solved. We use a demo user. Auth would consume 2–3 hours better spent on the saga and load test. |
 | **Microservices deployment** | With 24 hours, a modular monolith with clear module boundaries proves identical concurrency guarantees with far less operational risk. We can articulate the service split as a next step. |
@@ -66,7 +68,7 @@ The standout deliverable is not a feature but a **proof**: a load test that fire
 | **Flight search UI** | The API supports flights as a bookable entity. The demo UI focuses on hotel booking for a cleaner story; flights are the second item in the saga demo. |
 | **Rate limiting / API gateway** | Important in production, but not for proving correctness under concurrency. |
 | **Kafka / message queue** | Our invariant needs strong transactional consistency, which Postgres row-locking already gives us. Routing bookings through an async queue would mean rebuilding correctness as an event-sourced saga — a bigger project than 24 hours affords, for no gain in the guarantee we're proving. |
-| **Load balancer / horizontal scaling** | Our load test proves the invariant against a single deployed instance; Postgres row locks already serialise correctly across instances if we ever add more. Not needed to prove this PS's core claim. |
+| **Load balancer / horizontal scaling** | Our load test proves the invariant against a single deployed instance; Postgres row locks already serialize correctly across instances if we ever add more. Not needed to prove this PS's core claim. |
 
 ---
 
@@ -74,82 +76,10 @@ The standout deliverable is not a feature but a **proof**: a load test that fire
 
 The main flow from the traveller's perspective, end to end:
 
-```
-                              ┌─────────────────────┐
-                              │   TRAVELLER LANDS    │
-                              │   ON SEARCH PAGE     │
-                              └──────────┬──────────┘
-                                         │
-                                         ▼
-                              ┌─────────────────────┐
-                              │  🔍 SEARCH           │
-                              │  Type in English     │
-                              │  or Hindi (AI parse) │
-                              │  OR use filters      │
-                              └──────────┬──────────┘
-                                         │
-                                         ▼
-                              ┌─────────────────────┐
-                              │  📋 VIEW RESULTS     │
-                              │  Hotel cards with    │
-                              │  live availability   │
-                              └──────────┬──────────┘
-                                         │
-                                    Select room
-                                         │
-                                         ▼
-                              ┌─────────────────────┐
-                              │  ⏳ HOLD ROOM        │
-                              │  10-min TTL starts   │
-                              │  Inventory locked    │
-                              └──────┬───────┬──────┘
-                                     │       │
-                          (optional) │       │
-                         ┌───────────┘       │
-                         ▼                   │
-              ┌─────────────────────┐        │
-              │  ✈️ ADD FLIGHT       │        │
-              │  (multi-item)       │        │
-              └──────────┬──────────┘        │
-                         │                   │
-                         └───────┬───────────┘
-                                 │
-                    ┌────────────┴────────────┐
-                    │                         │
-                    ▼                         ▼
-       ┌──────────────────┐      ┌──────────────────┐
-       │  ✅ CONFIRM + PAY │      │  ⏰ TTL EXPIRES   │
-       │  (within 10 min)  │      │  Hold released    │
-       │  Mock payment     │      │  Inventory        │
-       │                   │      │  restocked        │
-       └────────┬─────────┘      └──────────────────┘
-                │
-                │  Multi-item?
-         ┌──────┴──────┐
-         │             │
-         ▼             ▼
-  ┌────────────┐ ┌────────────┐
-  │ All items  │ │ Partial    │
-  │ succeed    │ │ failure    │
-  │ ✅ BOOKED  │ │ 🔄 SAGA    │
-  │            │ │ compensate │
-  └─────┬──────┘ └────────────┘
-        │
-        ▼
-  ┌────────────────┐       ┌────────────────┐
-  │ 📄 MY BOOKINGS │──────▶│ ❌ CANCEL       │
-  │  View status   │       │ Inventory      │
-  │  per item      │       │ restocked      │
-  └────────────────┘       └────────────────┘
-```
-
 ### Screen 1 — Search (AI-Powered)
 
 The traveller lands on a search page with a prominent text input. They can type in natural language — in English or Hindi:
-
-> *"3-star hotel in Jaipur for 2 adults, Dec 15–17, under ₹5000/night"*
-> or
-> *"जयपुर में 2 रातों के लिए होटल, ₹5000 से कम"*
+> *"3-star hotel in Jaipur for 2 adults, Dec 15–17, under ₹5000/night"* or *"जयपुर में 2 रातों के लिए होटल, ₹5000 से कम"*
 
 The AI (Gemini) parses this into structured parameters: city, dates, guests, max price, star rating. The system queries `inventory_calendar` joined with `hotels`, `hotel_room_types`, and `hotel_rate_plans` — returning only rooms with available units (`total_units - booked_units - held_units > 0`).
 
@@ -158,6 +88,7 @@ Results appear as hotel cards showing: hotel name, star rating, guest score, roo
 ### Screen 2 — Hold & Book
 
 The traveller selects a room and clicks **"Hold Room"**. The system:
+
 - Creates a hold with a 10-minute TTL
 - Decrements available units instantly
 - Shows a **countdown timer** on screen
@@ -165,6 +96,7 @@ The traveller selects a room and clicks **"Hold Room"**. The system:
 The traveller sees the booking details: hotel, room type, dates, price breakdown, and the ticking countdown. They can optionally **add a flight** (multi-item booking).
 
 Two paths:
+
 - **Confirm & Pay** (within TTL): Mock payment processes, hold converts to confirmed booking. The traveller sees a confirmation page with booking reference.
 - **Timer expires**: Hold auto-releases, inventory restocks, traveller sees "Hold expired — search again."
 
@@ -177,13 +109,12 @@ The traveller sees their bookings: confirmed, cancelled, and partially-confirmed
 ### Screen 4 — Load Test Dashboard (Demo)
 
 A special demo page that visualises the system's correctness. The presenter:
+
 1. Selects a scarce inventory row (e.g., "Lake Nest Suites / Executive — 2 total, 1 free")
 2. Configures concurrent requests (e.g., 200 requests for 1 unit each)
 3. Fires the load test
-4. Watches real-time charts: requests in flight, successes, rejections, and **p50 / p95 / p99 latency** under lock contention
-5. Sees the final result: exactly 1 success, 199 rejections, latency distribution, and the DB invariant query returning zero violations
-
-The latency percentiles are the visually convincing "this is a real systems problem" story — they show the cost of serialised access under contention, not just the pass/fail outcome.
+4. Watches a real-time chart: requests in flight, successes, rejections, and **p50/p95/p99 latency**
+5. Sees the final result: exactly 1 success, 199 rejections, and the DB invariant query returning zero violations
 
 ---
 
@@ -220,7 +151,9 @@ The latency percentiles are the visually convincing "this is a real systems prob
 │  ┌────────────────────────▼───────────────────────────────────┐ │
 │  │     Hold Expiry Worker (setInterval · 30s cycle)           │ │
 │  │     Releases expired holds, decrements held_units          │ │
-│  │     (single-instance; production: advisory lock / worker)  │ │
+│  │     Single-instance assumption — one API process runs      │ │
+│  │     the worker; a production deploy would use an           │ │
+│  │     advisory lock or a separate worker process.             │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -228,10 +161,15 @@ The latency percentiles are the visually convincing "this is a real systems prob
 │  └────────────────────────────────────────────────────────────┘ │
 └──────────────────────┬──────────────────────────────────────────┘
                        │
+                ┌──────▼──────┐
+                │  pg.Pool     │  max: 20 — reused connections instead
+                │ (connection  │  of one-per-request; requests queue for
+                │  pooling)    │  a free connection instead of Postgres
+                └──────┬──────┘  refusing them outright.
+                       │
 ┌──────────────────────▼──────────────────────────────────────────┐
 │                    PostgreSQL (Railway)                           │
 │                                                                  │
-│  Connection pool: pg.Pool({ max: 20 }) — reuses connections      │
 │  Row-level locking: SELECT ... FOR UPDATE                        │
 │  ACID transactions for every inventory mutation                  │
 │  CHECK: booked_units + held_units <= total_units                 │
@@ -243,22 +181,18 @@ The latency percentiles are the visually convincing "this is a real systems prob
          (NL parsing, function calling)
 ```
 
-**Why a modular monolith, not microservices?**
-With 24 hours, a single deployable unit with clearly separated modules gives us shared database transactions (critical for saga compensation), one deploy target, and easy debugging under load — all while proving identical concurrency guarantees. The module boundaries are designed for future service extraction.
-
-**Connection pooling:** We use `pg`'s built-in `Pool` with `{ max: 20 }` — the app reuses a fixed set of open connections rather than opening one per request. Under load, requests queue briefly for a free connection instead of PostgreSQL rejecting them outright.
-
-**Hold expiry worker caveat:** The `setInterval`-based expiry worker runs inside the API process, which is correct for a single-instance deployment. In production with multiple instances, this would need a PostgreSQL advisory lock or a dedicated worker process to prevent duplicate expiry runs — a deliberate simplification for the 24-hour scope.
+**Why a modular monolith, not microservices?** With 24 hours, a single deployable unit with clearly separated modules gives us shared database transactions (critical for saga compensation), one deploy target, and easy debugging under load — all while proving identical concurrency guarantees. The module boundaries are designed for future service extraction.
 
 ### Concurrency Hardening Notes
 
-These are small, deliberate decisions made specifically because the PS is graded on correctness under concurrency — each is cheap to implement but closes a real failure mode under load.
+These are small, deliberate decisions made specifically because the PS is graded on correctness under concurrency — each is cheap to implement but closes a real failure mode in our own load test.
 
-- **Fixed lock ordering to prevent deadlock.** A multi-item booking (hotel + flight) locks two rows with `FOR UPDATE`. Two concurrent multi-item bookings could lock them in opposite order and deadlock. We always acquire locks sorted ascending by `inventory_calendar.inventory_id` before locking, regardless of request order.
-- **Idempotency via atomic upsert, not check-then-insert.** A naive "check the key, then insert" has a race: two retries can both pass the check before either inserts. We use `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`; if it returns no row, we `SELECT` the existing row by that key and return it. Genuinely atomic under concurrent retries.
-- **Explicit `lock_timeout = '2s'`.** Under heavy contention on the same row, a queued request would otherwise hang until the lock frees. We set `lock_timeout` per transaction so contended requests fail fast with a clear "sold out" — which also makes the load-test dashboard show clean, fast rejections instead of appearing stalled.
-- **Isolation level stated explicitly: `READ COMMITTED` + explicit row locks, not `SERIALIZABLE`.** Our conflicts are on known rows (`inventory_calendar` by id), so explicit `FOR UPDATE` locking is sufficient and avoids the serialisation-failure retries `SERIALIZABLE` would otherwise require for no benefit here.
-- **Index check on the lock query's WHERE clause.** We confirm `inventory_calendar` has an index on `(entity_type, entity_id, for_date)` before load testing — an unindexed lock query can scan and lock more rows than intended, which under concurrency causes exactly the contention we're trying to prove we don't have.
+- **Fixed lock ordering to prevent deadlock.** A multi-item booking (hotel + flight) locks two rows with `FOR UPDATE`. Two concurrent multi-item bookings could lock them in opposite order and deadlock. We always acquire locks in a fixed order — sorted ascending by `inventory_calendar.id` — before locking, regardless of the order items appear in the request.
+- **Idempotency via atomic upsert, not check-then-insert.** A naive "check the key, then insert" has a race: two retries can both pass the check before either inserts. We use `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`; if it returns no row, we `SELECT` the existing row by that key and return it. This is genuinely atomic under concurrent retries.
+- **Connection pooling (`pg.Pool`, `max: 20`).** Without pooling, firing 200–500 concurrent load-test requests risks exceeding Postgres's default `max_connections` (~100) — the load test would then be measuring a connection limit, not our locking logic. The pool reuses a small set of open connections; requests queue briefly for one instead of being refused.
+- **Explicit `lock_timeout`.** Under heavy contention on the same row, a queued request would otherwise hang until the lock frees. We set `lock_timeout = '2s'` per transaction so contended requests fail fast with a clear "try again," which also makes the load-test dashboard show clean, fast rejections instead of appearing stalled.
+- **Isolation level stated explicitly: `READ COMMITTED` + explicit row locks, not `SERIALIZABLE`.** Our conflicts are on known rows (`inventory_calendar` by id), so explicit `FOR UPDATE` locking is sufficient and avoids the serialization-failure retries `SERIALIZABLE` would otherwise add for no benefit here.
+- **Index check on the lock query's WHERE clause.** We confirm `inventory_calendar` has an index on `(hotel_room_type_id, for_date)` (or the equivalent columns our `FOR UPDATE` query filters on) before load testing — an unindexed lock query can scan and lock more rows than intended, which under concurrency causes exactly the contention we're trying to prove we don't have.
 - **No I/O inside the locked transaction.** The mock payment call happens either before the lock is acquired (validate) or after it's released (record) — never while the row is locked — so a slow or failed external call can never hold up other requests waiting on the same inventory row.
 
 ---
@@ -282,10 +216,6 @@ TRAVELLER                    BACKEND                         DATABASE (PostgreSQ
     │  2. Hold Room (idemp.key)  │                                │
     │ ──────────────────────────>│                                │
     │                            │  BEGIN TRANSACTION             │
-    │                            │  INSERT hold ON CONFLICT       │
-    │                            │    (idempotency_key) DO NOTHING│
-    │                            │  → returned? → idempotent hit  │
-    │                            │  → nothing? → SELECT existing  │
     │                            │  SELECT ... FOR UPDATE (lock)  │
     │                            │ ─────────────────────────────> │
     │                            │  Check: free >= requested?     │
@@ -300,11 +230,13 @@ TRAVELLER                    BACKEND                         DATABASE (PostgreSQ
     │  3a. Confirm + Pay (idemp.key)              │               │
     │ ──────────────────────────>│                                │
     │                            │  BEGIN TRANSACTION             │
-    │                            │  INSERT booking ON CONFLICT    │
-    │                            │    (idemp.key) DO NOTHING      │
-    │                            │  → existing? return it (done)  │
+    │                            │  INSERT ... ON CONFLICT         │
+    │                            │  (idempotency_key) DO NOTHING   │
+    │                            │  RETURNING * — atomic upsert,   │
+    │                            │  no dupe even under concurrent  │
+    │                            │  retries                        │
     │                            │  FOR UPDATE → move held→booked │
-    │                            │  INSERT booking_items          │
+    │                            │  INSERT booking, booking_items │
     │                            │  INSERT payment (mock)         │
     │                            │  COMMIT                        │
     │                            │ ─────────────────────────────> │
@@ -336,37 +268,32 @@ TRAVELLER                    BACKEND                         DATABASE (PostgreSQ
 
 ### Multi-Item Saga Flow
 
+Locks are acquired in a fixed order (ascending by `inventory_calendar.id`) across items before either item is touched, to prevent deadlock between two concurrent multi-item bookings.
+
 ```
-  CONFIRM MULTI-ITEM (hotel + flight)
-      │
-      ▼
-  ┌─ SORT items by inventory_id ASC ──────┐
-  │  (prevents deadlock when two sagas    │
-  │   lock the same rows in reverse order)│
-  └────────────────────────┬──────────────┘
-                           │
-  ┌─ Try Item 1 (Hotel) ──▼───────────────┐
-  │  BEGIN → FOR UPDATE → confirm → COMMIT │
-  │  ✓ Success                             │
-  └────────────────────────┬───────────────┘
-                           │
-  ┌─ Try Item 2 (Flight) ─▼───────────────┐
-  │  BEGIN → FOR UPDATE → confirm → COMMIT │
-  │  ✗ FAILURE (sold out)                  │
-  └────────────────────────┬───────────────┘
-                           │
-  ┌─ COMPENSATE ───────────▼───────────────┐
-  │  Roll back Item 1:                     │
-  │  Decrement booked_units                │
-  │  Set booking_item status='compensated' │
-  │  Set compensated_at = NOW()            │
-  │  Restock inventory                     │
-  └────────────────────────────────────────┘
+CONFIRM MULTI-ITEM (hotel + flight)
+    │
+    ▼
+┌─ Try Item 1 (Hotel) ──────────────────┐
+│  BEGIN → FOR UPDATE → confirm → COMMIT │
+│  ✓ Success                             │
+└────────────────────────┬───────────────┘
+                         │
+┌─ Try Item 2 (Flight) ─▼───────────────┐
+│  BEGIN → FOR UPDATE → confirm → COMMIT │
+│  ✗ FAILURE (sold out)                  │
+└────────────────────────┬───────────────┘
+                         │
+┌─ COMPENSATE ───────────▼───────────────┐
+│  Roll back Item 1:                     │
+│  Decrement booked_units                │
+│  Set booking_item status='compensated' │
+│  Set compensated_at = NOW()            │
+│  Restock inventory                     │
+└────────────────────────────────────────┘
 ```
 
-**Deadlock prevention:** Items are always locked in ascending `inventory_id` order. Two concurrent multi-item bookings that share rows will always acquire locks in the same sequence, eliminating deadlock.
-
-**Idempotency under concurrency:** All idempotent endpoints use `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`. If the insert returns a row, it is new. If it returns nothing, we `SELECT` the existing row and return it. This eliminates the race between two concurrent retries both passing a "check then insert" — the database's unique constraint resolves the race atomically.
+**Known limitation:** if the compensation transaction itself fails mid-flight (e.g. a connection drop), a booking item could be left neither confirmed nor compensated. Full recovery (e.g. a reconciliation sweep) is out of scope for 24 hours — this is a deliberate cut, tracked as Risk 4 below, not an unaddressed gap.
 
 ---
 
@@ -375,8 +302,8 @@ TRAVELLER                    BACKEND                         DATABASE (PostgreSQ
 ### Provided Tables We Use (14 of 20)
 
 | Table | How We Use It |
-|-------|---------------|
-| **`inventory_calendar`** (15,030 rows) | **Central table.** Every availability check, hold, booking, and restock mutates this table. The `booked_units + held_units ≤ total_units` CHECK constraint is the invariant we defend. We verify an index exists on `(entity_type, entity_id, for_date)` — the columns our `FOR UPDATE` query filters on — before load testing. |
+| --- | --- |
+| **`inventory_calendar`** (15,030 rows) | **Central table.** Every availability check, hold, booking, and restock mutates this table. The `booked_units + held_units ≤ total_units` CHECK constraint is the invariant we defend. We confirm an index exists on the columns our `FOR UPDATE` lock query filters on (`hotel_room_type_id`, `for_date`) before load testing. |
 | **`holds`** (496 rows) | TTL reservations. We create, expire, confirm, and release holds. Retained per Rule R8. |
 | **`bookings`** (1,996 rows) | Order header with mandatory `idempotency_key`. Every confirmed booking lives here. |
 | **`booking_items`** (2,669 rows) | Line items per booking. The `status='compensated'` value and `compensated_at` field are what make saga rollback auditable. |
@@ -394,8 +321,8 @@ TRAVELLER                    BACKEND                         DATABASE (PostgreSQ
 ### Tables We Add (Rule R1 — Additive Only)
 
 | New Table | Purpose | Key Fields |
-|-----------|---------|------------|
-| `load_test_runs` | Stores load test configuration and aggregate results for the dashboard | `run_id (PK, ltr_ prefix)`, `target_inventory_id`, `concurrent_requests`, `successes`, `failures`, `invariant_violations`, `p50_ms`, `p95_ms`, `p99_ms`, `created_at` |
+| --- | --- | --- |
+| `load_test_runs` | Stores load test configuration and aggregate results for the dashboard | `run_id (PK, ltr_ prefix)`, `target_inventory_id`, `concurrent_requests`, `successes`, `failures`, `invariant_violations`, `created_at` |
 | `load_test_results` | Per-request outcome within a load test run | `result_id (PK, ltrs_ prefix)`, `run_id (FK)`, `status` (success/sold_out/error), `latency_ms`, `created_at` |
 | `search_logs` | AI search queries and parsed parameters for measuring accuracy | `log_id (PK, slg_ prefix)`, `raw_query`, `language (BCP-47)`, `parsed_params (JSON)`, `result_count`, `created_at` |
 
@@ -463,7 +390,7 @@ All new tables follow the existing conventions: opaque prefixed IDs (R2), timest
 ## 10. Tech Stack
 
 | Layer | Choice | Why |
-|-------|--------|-----|
+| --- | --- | --- |
 | **Runtime** | Node.js 20+ | Team's strongest stack; excellent async I/O for handling concurrent booking requests |
 | **Framework** | Express.js | Battle-tested, minimal boilerplate, fast to scaffold REST APIs |
 | **Database** | PostgreSQL (Railway) | Row-level locking (`SELECT ... FOR UPDATE`) provides the concurrency guarantee that is the entire point of APS-05 |
@@ -482,7 +409,7 @@ All new tables follow the existing conventions: opaque prefixed IDs (R2), timest
 ### Team Allocation
 
 | Person | Primary Role |
-|--------|-------------|
+| --- | --- |
 | **Thijesh** | Backend: inventory service, concurrency (FOR UPDATE, fixed lock ordering), hold/booking/cancel APIs, saga |
 | **Tejas** | Backend + AI: Express scaffold, Gemini integration, NL search, multilingual |
 | **Yogita** | Frontend: React UI, search page, booking flow, load test dashboard |
@@ -491,10 +418,10 @@ All new tables follow the existing conventions: opaque prefixed IDs (R2), timest
 ### Schedule
 
 | Block | Time | Thijesh | Tejas | Yogita | Neha |
-|-------|------|---------|-------|--------|------|
+| --- | --- | --- | --- | --- | --- |
 | **0** | 12:00–13:00 | **ALL:** Agree demo flow, confirm API contracts, set up repo + Railway | | | |
-| **1** | 13:00–15:00 | DB schema (Knex migrations), inventory search + availability APIs, configure `pg.Pool(max:20)` | Express project, route structure, middleware, error handling | React+Vite setup, design system, dark theme, component library | Load Postgres with CSV data, verify conformance, run starter queries, **confirm index on `inventory_calendar(entity_type, entity_id, for_date)`** |
-| **2** | 15:00–17:00 | `createHold()` with FOR UPDATE + idempotency (`ON CONFLICT`), fixed lock ordering, `releaseHold()` | Gemini function calling: NL → structured search params, wire to search | Search page UI: search bar, hotel cards, availability badges | Hold expiry worker, unit tests for inventory module |
+| **1** | 13:00–15:00 | DB schema (Knex migrations), inventory search + availability APIs, configure `pg.Pool(max:20)` | Express project, route structure, middleware, error handling | React+Vite setup, design system, dark theme, component library | Load Postgres with CSV data, verify conformance, run starter queries, **confirm index on `inventory_calendar(hotel_room_type_id, for_date)`** |
+| **2** | 15:00–17:00 | `createHold()` with FOR UPDATE + idempotency, fixed lock ordering, `releaseHold()` | Gemini function calling: NL → structured search params, wire to search | Search page UI: search bar, hotel cards, availability badges | Hold expiry worker, unit tests for inventory module |
 | **3** | 17:00–19:00 | `confirmBooking()` (hold→booking+payment) via `INSERT...ON CONFLICT...RETURNING`, `lock_timeout` set | Multilingual: Hindi query parsing, AI result summaries | Booking flow: hold countdown timer, confirm/pay modal | Integration tests: hold → expire → restock, hold → confirm |
 | **4** | 19:00–21:00 | Multi-item saga: `confirmMultiItem()` with compensation, fixed lock order across items | End-to-end AI search flow connected to frontend | Multi-item UI, saga status display | Load test engine: fire N concurrent requests, collect results incl. latency |
 | **5** | 21:00–23:00 | Cancellation → restock, edge cases (double-cancel, expired hold confirm) | Test 20 NL queries, tune prompts, handle edge cases | Load test dashboard: real-time chart, counters, p50/p95/p99 latency | First real load tests, find concurrency bugs |
@@ -511,25 +438,18 @@ All new tables follow the existing conventions: opaque prefixed IDs (R2), timest
 ## 12. Risks and Fallbacks
 
 | # | Risk | Likelihood | Fallback |
-|---|------|-----------|----------|
+| --- | --- | --- | --- |
 | **1** | **Gemini API rate limit or network failure during live demo** | Medium | Pre-cache the 3 demo search queries (results stored locally). Fall back to structured search form with dropdowns. The AI feature is demonstrated either way — live if possible, cached if not. |
-| **2** | **Concurrency bugs surface under real load** | High (initially) | Begin load testing by hour 10 (21:00), not hour 20. This gives 12+ hours to find and fix race conditions. The PostgreSQL CHECK constraint (`booked + held ≤ total`) acts as a hard safety net — even if our application logic has a bug, the database rejects the oversell. |
+| **2** | **Concurrency bugs surface under real load** | High (initially) | Begin load testing by hour 10 (21:00), not hour 20. This gives 12+ hours to find and fix race conditions. The PostgreSQL CHECK constraint (`booked + held ≤ total`) acts as a hard safety net — even if our application logic has a bug, the database rejects the oversell. Fixed lock ordering and an explicit `lock_timeout` reduce the two most likely causes (deadlock, hung requests) before they show up under load. |
 | **3** | **Venue network or Railway downtime during presentation** | Medium | Record a complete demo run as a screen capture before 09:00 on Day 2. Keep it on the demo machine, playable offline. We also maintain a local PostgreSQL Docker setup as a cold backup that can be started in under 2 minutes. |
-
-### Known Limitations (Deliberate 24-Hour Scope Cuts)
-
-| Limitation | Why we accept it | Production fix |
-|-----------|------------------|----------------|
-| **Compensation itself failing mid-flight** | If the saga compensates Item 1 but the compensation transaction drops (connection blip), the booking is left neither fully confirmed nor fully compensated. Within 24 hours, we do not implement a recovery mechanism for this. | A dead-letter queue or compensation-retry table that a background worker polls. Each compensation step would be idempotent, so retries are safe. |
-| **Expiry worker is single-instance** | The `setInterval` hold-expiry worker runs inside the API process. With one Railway instance this is correct, but with multiple instances each would run its own expiry loop, potentially double-processing the same holds. | Use a PostgreSQL advisory lock (`pg_try_advisory_lock`) so only one instance runs expiry at a time, or extract the worker into a separate dedicated process. |
-| **No saga orchestrator persistence** | The saga state lives in application memory during execution. A server crash mid-saga loses the in-progress state. | Persist saga state to a `saga_log` table so a restarted process can resume or compensate incomplete sagas. |
+| **4** | **Compensation transaction itself fails mid-flight** (e.g. connection drop during saga rollback), leaving a booking item neither confirmed nor compensated | Low | Out of scope for 24 hours — full reconciliation would need a recovery sweep. This is a deliberate, stated cut rather than an unaddressed gap; if it surfaces during the demo, the affected item is manually corrected in the DB before continuing. |
 
 ---
 
 ## 13. Multilingual Approach
 
 | Aspect | Implementation |
-|--------|---------------|
+| --- | --- |
 | **Languages supported** | English (default) + Hindi |
 | **AI search input** | Gemini handles Hindi natively — queries in either language produce structured search params. Tested with 10 parallel Hindi/English query pairs. |
 | **UI labels** | Bilingual i18n JSON files (`en.json`, `hi.json`). Language toggle in the header. Key surfaces: search page, booking flow, error messages, confirmation screen. |
