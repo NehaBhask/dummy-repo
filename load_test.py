@@ -102,6 +102,15 @@ def percentile(sorted_vals, p):
     return sorted_vals[min(k, len(sorted_vals) - 1)]
 
 
+async def warmup(pool):
+    """Open every pooled connection now, so the first real target isn't the
+    one paying for connection setup and skewing its latency numbers."""
+    async def ping():
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+    await asyncio.gather(*(ping() for _ in range(pool.get_max_size())))
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=200, help="concurrent hold attempts per target row")
@@ -126,6 +135,7 @@ async def main():
 
     batch = uuid.uuid4().hex[:8]
     pool = await asyncpg.create_pool(args.dsn, min_size=5, max_size=min(50, args.workers))
+    await warmup(pool)
 
     async with pool.acquire() as conn:
         targets = await conn.fetch(FIND_TARGETS, args.targets)

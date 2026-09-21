@@ -30,7 +30,7 @@ def main():
 
     sql = open(args.schema, encoding="utf-8").read()
     if args.skip_vector:
-        sql = re.sub(r"^CREATE EXTENSION IF NOT EXISTS vector;\s*$", "", sql, flags=re.M)
+        sql = re.sub(r"^CREATE EXTENSION IF NOT EXISTS vector;.*$", "", sql, flags=re.M)
 
     with psycopg.connect(args.dsn, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(sql)
