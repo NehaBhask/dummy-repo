@@ -71,6 +71,7 @@ export const hotelQuery = z.object({
   breakfast: bool.optional(),
   refundable: bool.optional(),
   currency: currency.optional(),
+  budget_currency: currency.optional(), // currency max_price is expressed in (default: display currency)
   sort: z.enum(['price', 'rating', 'score']).optional(),
   limit: int(1, 50, 20),
 });

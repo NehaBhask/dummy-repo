@@ -94,9 +94,10 @@ export async function searchHotels(q) {
           per_night: moneyOut(fx, convert(fx, perNightNative, r.currency, out), out),
           total: moneyOut(fx, convert(fx, totalNative, r.currency, out), out),
           _cmp: D(convert(fx, perNightNative, r.currency, out)),
+          _budget: D(convert(fx, perNightNative, r.currency, q.budget_currency ?? out)),
         };
       })
-      .filter((o) => q.max_price == null || o._cmp.lte(q.max_price))
+      .filter((o) => q.max_price == null || o._budget.lte(q.max_price)) // budget is in budget_currency (default: display currency)
       .sort((a, b) => a._cmp.cmp(b._cmp));
     if (!priced.length) continue;
 
@@ -112,7 +113,7 @@ export async function searchHotels(q) {
       stay: { entity_type: 'room_type', entity_id: r.room_type_id, for_date: q.check_in, nights, units: rooms },
       inventory: r.inventory_ids.map((id, i) => ({ inventory_id: id, for_date: r.dates[i] })),
       from_price: priced[0].per_night,
-      options: priced.map(({ _cmp, ...o }) => o),
+      options: priced.map(({ _cmp, _budget, ...o }) => o),
       _cmp: priced[0]._cmp,
     };
 

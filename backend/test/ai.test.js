@@ -62,3 +62,12 @@ test('aiSearch: Hindi without a Gemini key is a clear ai_unavailable, and an unk
   const r = await aiSearch({ query: 'a nice place somewhere' });
   assert.equal(r.needs_clarification, 'city');
 });
+
+test('aiSearch: a city with hotels but no inventory (Goa → Panaji) explains itself and suggests cities that do have rooms', async (t) => {
+  if (config.gemini.apiKey) return t.skip('live key configured; this test targets the offline path');
+  const r = await aiSearch({ query: 'family room in Goa, 3 nights, 2 rooms' });
+  assert.equal(r.total, 0);
+  assert.equal(r.no_results_reason, 'city_has_no_inventory');
+  assert.ok(r.cities_with_inventory.includes('Jaipur'));
+  await pool.query(`DELETE FROM search_logs WHERE raw_query = 'family room in Goa, 3 nights, 2 rooms'`);
+});

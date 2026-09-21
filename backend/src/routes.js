@@ -40,13 +40,72 @@ export function buildRouter({ worker } = {}) {
   });
   r.get('/metrics', (_req, res) => res.json({ safety_net_hits: metrics.safetyNetHits, sold_out_shield: config.fastReject && config.soldOutCacheMs > 0 }));
   r.get('/demo-user', async (_req, res) => res.json(await demoUser()));
+
+  // Everything the UI needs to configure itself in one call.
+  r.get('/meta', async (_req, res) => {
+    const { rows } = await pool.query(
+      `SELECT min(for_date)::text AS from_date, max(for_date)::text AS to_date, CURRENT_DATE::text AS today
+         FROM inventory_calendar`,
+    );
+    const w = rows[0];
+    const tomorrow = new Date(Date.parse(`${w.today}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+    const dflt = tomorrow < w.from_date ? w.from_date : tomorrow > w.to_date ? w.from_date : tomorrow;
+    res.json({
+      today: w.today,
+      inventory_window: { from: w.from_date, to: w.to_date },
+      default_check_in: dflt,
+      user: await demoUser(),
+      ai_search: { enabled: Boolean(config.gemini.apiKey), fallback: 'english-only heuristic' },
+      demo_controls: config.faultInjection, // fault injection + short hold TTLs are offered only outside production
+      hold_ttl_seconds: config.holdTtlSeconds,
+    });
+  });
   r.get('/invariants', async (_req, res) => res.json(await checkInvariants()));
 
+  // `bookable` = the city has room-night inventory (only 43 of 60 do), so the UI can steer users
+  // away from cities that would always return nothing.
   r.get('/cities', async (_req, res) => {
     const { rows } = await pool.query(
-      `SELECT city_id, name, state, country_code FROM cities WHERE status = 'active' ORDER BY name`,
+      `SELECT c.city_id, c.name, c.state, c.country_code,
+              COALESCE(b.room_nights, 0)::int AS room_nights,
+              (b.room_nights IS NOT NULL) AS bookable
+         FROM cities c
+         LEFT JOIN (
+           SELECT h.city_id, count(*) AS room_nights
+             FROM inventory_calendar ic
+             JOIN hotel_room_types rt ON rt.room_type_id = ic.entity_id
+             JOIN hotels h ON h.hotel_id = rt.hotel_id
+            WHERE ic.entity_type = 'room_type' AND ic.for_date >= CURRENT_DATE
+            GROUP BY h.city_id
+         ) b ON b.city_id = c.city_id
+        WHERE c.status = 'active'
+        ORDER BY (b.room_nights IS NULL), c.name`,
     );
     res.json({ cities: rows });
+  });
+
+  // Origin → destination pairs that have flight seats, with the departure dates that have any.
+  r.get('/flights/routes', async (req, res) => {
+    const { rows } = await pool.query(
+      `SELECT oc.name AS origin, dc.name AS destination,
+              array_agg(DISTINCT ic.for_date::text ORDER BY ic.for_date::text) AS dates
+         FROM inventory_calendar ic
+         JOIN flight_fares ff ON ff.fare_id = ic.entity_id
+         JOIN flights f ON f.flight_id = ff.flight_id
+         JOIN airports oa ON oa.airport_id = f.origin_airport_id
+         JOIN cities oc ON oc.city_id = oa.city_id
+         JOIN airports da ON da.airport_id = f.dest_airport_id
+         JOIN cities dc ON dc.city_id = da.city_id
+        WHERE ic.entity_type = 'flight_fare' AND ic.for_date >= CURRENT_DATE
+          AND ic.total_units - ic.booked_units - ic.held_units >= 1
+          AND ($1::text IS NULL OR lower(dc.name) = lower($1))
+          AND ($2::text IS NULL OR lower(oc.name) = lower($2))
+        GROUP BY oc.name, dc.name
+        ORDER BY count(DISTINCT ic.for_date) DESC, oc.name, dc.name
+        LIMIT 80`,
+      [req.query.destination ?? null, req.query.origin ?? null],
+    );
+    res.json({ routes: rows });
   });
 
   r.get('/currencies', async (_req, res) => {

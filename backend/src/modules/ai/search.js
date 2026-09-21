@@ -60,15 +60,27 @@ export function primeCache(query, params) {
 }
 const normalise = (q) => q.trim().toLowerCase().replace(/\s+/g, ' ');
 
+// Try each configured model in turn: a busy (503), retired (404) or slow model must not take the
+// search bar down. The first model that answers wins; the last error is reported if all fail.
 async function callGemini(body) {
-  const res = await fetch(`${GEMINI}/${config.gemini.model}:generateContent`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-goog-api-key': config.gemini.apiKey },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  let lastErr;
+  for (const model of config.gemini.models) {
+    try {
+      const res = await fetch(`${GEMINI}/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': config.gemini.apiKey },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) throw new Error(`gemini ${model} ${res.status}: ${(await res.text()).replace(/\s+/g, ' ').slice(0, 160)}`);
+      const json = await res.json();
+      json.__model = model;
+      return json;
+    } catch (err) {
+      lastErr = err.name === 'TimeoutError' ? new Error(`gemini ${model} timed out`) : err;
+    }
+  }
+  throw lastErr;
 }
 
 async function parseWithGemini(text, today, names) {
@@ -89,6 +101,7 @@ async function parseWithGemini(text, today, names) {
   });
   const call = json.candidates?.[0]?.content?.parts?.find((p) => p.functionCall)?.functionCall;
   if (!call?.args) throw new Error('gemini returned no function call');
+  Object.defineProperty(call.args, '__model', { value: json.__model, enumerable: false });
   return call.args;
 }
 
@@ -168,7 +181,16 @@ async function summarise(results, lang) {
 }
 
 /** Map model/heuristic output onto the search API's parameter names, with safe defaults. */
-function toSearchParams(p, today) {
+const CURRENCY_HINTS = [[/₹|रुपये|रुपए|\brs\.?\b|\binr\b/i, 'INR'], [/\$|\busd\b|dollar/i, 'USD'], [/€|\beur\b/i, 'EUR'], [/£|\bgbp\b/i, 'GBP']];
+
+// A budget with no currency would be compared against each hotel's own currency (a Dubai hotel's AED
+// against ₹5000), so infer it from the traveller's own text, defaulting to INR for this platform.
+function budgetCurrency(p, text) {
+  if (p.currency && /^[A-Z]{3}$/.test(p.currency)) return p.currency;
+  return CURRENCY_HINTS.find(([re]) => re.test(text))?.[1] ?? 'INR';
+}
+
+function toSearchParams(p, today, text = '') {
   return {
     city: p.city,
     check_in: p.check_in_date ?? addDays(today, 1),
@@ -176,13 +198,34 @@ function toSearchParams(p, today) {
     rooms: clamp(p.rooms ?? 1, 1, 10),
     adults: clamp(p.adults ?? 2, 1, 20),
     max_price: p.max_price_per_night > 0 ? p.max_price_per_night : undefined,
-    currency: p.currency && /^[A-Z]{3}$/.test(p.currency) ? p.currency : undefined,
+    currency: p.max_price_per_night > 0 ? budgetCurrency(p, text) : undefined,
     min_stars: p.star_rating ? clamp(p.star_rating, 1, 5) : undefined,
     breakfast: p.preferences?.includes('breakfast') || undefined,
     refundable: p.preferences?.includes('refundable') || undefined,
   };
 }
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.trunc(Number(n))));
+
+// Only some hotels have room-night rows in inventory_calendar (in the seed, 43 of 60 cities), so a city
+// can exist in the catalogue and still never return a result. Say so instead of a bare "0 results".
+const withInventory = { at: 0, rows: [] };
+async function citiesWithInventory() {
+  if (Date.now() - withInventory.at > 10 * 60_000) {
+    withInventory.rows = (
+      await pool.query(
+        `SELECT c.name, count(*)::int AS room_nights
+           FROM inventory_calendar ic
+           JOIN hotel_room_types rt ON rt.room_type_id = ic.entity_id
+           JOIN hotels h ON h.hotel_id = rt.hotel_id
+           JOIN cities c ON c.city_id = h.city_id
+          WHERE ic.entity_type = 'room_type' AND ic.for_date >= CURRENT_DATE
+          GROUP BY c.name ORDER BY room_nights DESC, c.name`,
+      )
+    ).rows;
+    withInventory.at = Date.now();
+  }
+  return withInventory.rows;
+}
 
 export async function aiSearch({ query, currency }) {
   const started = Date.now();
@@ -215,7 +258,9 @@ export async function aiSearch({ query, currency }) {
     return { language, parser, fallback_reason: fallbackReason, parsed_params: raw, needs_clarification: 'city', results: [], total: 0 };
   }
 
-  const params = toSearchParams(raw, today);
+  const params = toSearchParams(raw, today, query);
+  // The budget stays in the currency the traveller stated it in; the header currency only changes how prices are shown.
+  params.budget_currency = params.max_price ? params.currency : undefined;
   if (currency) params.currency = currency;
   const found = await searchHotels(params);
   const summary = parser === 'heuristic' && !config.gemini.apiKey ? null : await summarise(found.results, language === 'hi' ? 'hi' : 'en');
@@ -231,6 +276,7 @@ export async function aiSearch({ query, currency }) {
   return {
     language,
     parser,
+    model: raw.__model,
     fallback_reason: fallbackReason,
     parsed_params: raw,
     search_params: found.query,
@@ -239,5 +285,15 @@ export async function aiSearch({ query, currency }) {
     fx_rate_date: found.fx_rate_date,
     total: found.total,
     results: found.results,
+    ...(found.total === 0 ? await noResultsHint(raw.city) : {}),
+  };
+}
+
+async function noResultsHint(city) {
+  const cities = await citiesWithInventory();
+  const has = cities.some((c) => c.name.toLowerCase() === String(city).toLowerCase());
+  return {
+    no_results_reason: has ? 'no_match_for_filters' : 'city_has_no_inventory',
+    cities_with_inventory: cities.slice(0, 10).map((c) => c.name),
   };
 }

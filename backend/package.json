@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
+    "build:web": "npm --prefix ../frontend install && npm --prefix ../frontend run build",
     "start:cluster": "node src/cluster.js",
     "dev": "node --watch src/index.js",
     "migrate": "node scripts/migrate.js",

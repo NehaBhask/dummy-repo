@@ -159,3 +159,15 @@ test('the whole database still satisfies every invariant after all of the above'
   const r = await checkInvariants();
   assert.ok(r.ok, JSON.stringify(r));
 });
+
+test('AI-style budget: a ₹ budget stays in INR even when prices are displayed in USD', async () => {
+  const inr = await call('GET', '/api/search/hotels?city=Jaipur&check_in=2026-10-10&nights=2&max_price=5000&currency=INR');
+  const usd = await call('GET', '/api/search/hotels?city=Jaipur&check_in=2026-10-10&nights=2&max_price=5000&budget_currency=INR&currency=USD');
+  assert.equal(usd.status, 200);
+  assert.equal(usd.body.total, inr.body.total, 'same hotels either way: only the display currency differs');
+  assert.ok(usd.body.total > 0);
+  for (const c of usd.body.results) assert.equal(c.from_price.currency, 'USD');
+  // and without budget_currency, 5000 means $5000 (almost everything qualifies)
+  const dollars = await call('GET', '/api/search/hotels?city=Jaipur&check_in=2026-10-10&nights=2&max_price=5000&currency=USD');
+  assert.ok(dollars.body.total >= usd.body.total);
+});

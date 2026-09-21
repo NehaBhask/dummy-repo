@@ -37,7 +37,13 @@ export const config = {
 
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || null,
-    model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    // gemini-2.5-flash is closed to new API users. Full "flash" models think before answering (6-19 s
+    // measured); the lite models answered the demo queries correctly in 1-3 s. Tried in order.
+    models: [
+      process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
+      ...(process.env.GEMINI_FALLBACK_MODELS ?? 'gemini-flash-lite-latest,gemini-3.1-flash-lite')
+        .split(',').map((m) => m.trim()).filter(Boolean),
+    ],
   },
   loadTestBaseUrl: process.env.LOADTEST_BASE_URL || null,
   corsOrigin: process.env.CORS_ORIGIN || '*',

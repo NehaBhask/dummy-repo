@@ -19,6 +19,21 @@ npm run loadtest -- --requests 500   # race 500 requests at a scarce row; run wh
 
 Defaults work with the repo's `docker-compose.yml` (`postgres:postgres@localhost:5433/kognivera`).
 
+## The web app
+
+The React UI lives in `../frontend` and is served by this same server once built, so the whole product is one
+command after a one-time build:
+
+```bash
+npm run build:web     # installs and builds ../frontend into ../frontend/dist (re-run after UI changes)
+npm start             # http://localhost:3000  → the app; /api/* → the API
+```
+
+Screens: **Search** (AI bar in English/Hindi + filters), **My trip** (live hold countdowns, add a flight,
+confirm & pay, retry-the-same-request, rollback view), **My bookings** (status filters, cancel), **Load test**
+(live chart, verdict, database-contention evidence). For UI development run `npm run dev` in `../frontend`
+(port 5173, proxies `/api` to :3000). See `../frontend/README.md`.
+
 ## The proof
 
 `npm run loadtest -- --requests 500 --inventory inv_4ebf56b9` (a real seed row, 3 rooms free), from a

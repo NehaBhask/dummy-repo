@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 import { ZodError } from 'zod';
@@ -18,6 +21,17 @@ export function createApp({ worker } = {}) {
   const router = buildRouter({ worker });
   app.use('/api', router);
   app.get('/health', (_req, res) => res.redirect(307, '/api/health'));
+
+  // Serve the built web app (frontend/dist) from the same server, so `npm start` is the whole product.
+  // Any non-API GET falls back to index.html (client-side routing).
+  const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../frontend/dist');
+  if (existsSync(path.join(dist, 'index.html'))) {
+    app.use(express.static(dist, { maxAge: '1h', index: false }));
+    app.get('/{*splat}', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(path.join(dist, 'index.html'));
+    });
+  }
 
   app.use((req, _res, next) => next(new AppError('not_found', { details: { path: req.path } })));
 
