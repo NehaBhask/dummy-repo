@@ -177,7 +177,7 @@ load-test engine (api/direct/duplicate keys), and NL parsing.
 ## Known limitations
 
 - Compensation that fails after 3 retries leaves the booking `partially_confirmed` (no recovery worker yet); state is not persisted beyond the booking/line rows.
-- `lock_timeout` (2 s) never fires in practice because the pool (max 20) bounds lock waiters; if it did, the request gets `503 contention_timeout`.
+- `lock_timeout` (2 s) never fires in practice at the design's pool size (20), because the pool itself bounds how many requests can be waiting on a lock at once. Under genuine system-wide overload — every pooled connection busy, not just one contended row — a request instead waits up to `PG_POOL_CONNECT_TIMEOUT_MS` (30 s) for a free connection; `fromPgError` maps that timeout (a plain client-side error with no SQLSTATE) to the same `503 contention_timeout` + `Retry-After` response, verified live by running a 2-connection pool against 500 concurrent requests: 461 came back `503`, zero came back as a bare `500`.
 - Cancellation refunds in full (rate-plan cancellation penalties are not applied).
 - Hold expiry is sweep-based every 30 s; a late confirm is still rejected exactly.
 

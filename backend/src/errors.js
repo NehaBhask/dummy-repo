@@ -115,7 +115,15 @@ export function pickLang(req) {
   return h.startsWith('hi') ? 'hi' : 'en';
 }
 
-// Translate low-level Postgres errors into API errors. Anything unrecognised is returned as-is.
+// Node-postgres' own pool-queue timeout is a plain client-side Error with no SQLSTATE .code
+// (verified: { code: undefined, message: 'timeout exceeded when trying to connect' }) — it would
+// otherwise fall through as an unrecognised error and surface as a bare 500. Under genuine
+// system-wide overload (every pooled connection busy, not just one contended row) this is the
+// failure mode that actually matters: callers should get the same fast, clear "busy, retry" the
+// row-lock-timeout case already gives, not a generic error.
+const POOL_TIMEOUT_MESSAGE = /timeout exceeded when trying to connect/i;
+
+// Translate low-level Postgres/pg-client errors into API errors. Anything unrecognised is returned as-is.
 export function fromPgError(err) {
   switch (err?.code) {
     case '55P03': // lock_not_available (lock_timeout)
@@ -128,7 +136,14 @@ export function fromPgError(err) {
       metrics.safetyNetHits++;
       console.error('[SAFETY NET] CHECK constraint rejected a write:', err.constraint, err.detail);
       return new AppError('sold_out', { details: { constraint: err.constraint } });
+    case 'ECONNREFUSED': // Postgres itself unreachable/down
+    case 'ENOTFOUND':
+    case 'ETIMEDOUT':
+      return new AppError('contention_timeout', { details: { reason: 'database unreachable', code: err.code } });
     default:
+      if (err instanceof Error && POOL_TIMEOUT_MESSAGE.test(err.message ?? '')) {
+        return new AppError('contention_timeout', { details: { reason: 'connection pool exhausted' } });
+      }
       return err;
   }
 }

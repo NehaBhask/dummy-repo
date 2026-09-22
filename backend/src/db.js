@@ -10,7 +10,8 @@ export const pool = new pg.Pool({
   max: config.poolMax,
   idleTimeoutMillis: 30_000,
   // Callers queue for a free connection instead of Postgres refusing them; this bounds that wait.
-  connectionTimeoutMillis: 30_000,
+  // On expiry it surfaces as a plain client-side Error with no SQLSTATE — see fromPgError().
+  connectionTimeoutMillis: config.poolConnectTimeoutMs,
 });
 
 pool.on('error', (err) => console.error('[pg pool] idle client error:', err.message));

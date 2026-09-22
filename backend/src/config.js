@@ -15,6 +15,8 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5433/kognivera',
   poolMax: int(process.env.PG_POOL_MAX, 20),
   lockTimeoutMs: int(process.env.LOCK_TIMEOUT_MS, 2000),
+  // How long a request queues for a free pool connection before giving up (503 contention_timeout).
+  poolConnectTimeoutMs: int(process.env.PG_POOL_CONNECT_TIMEOUT_MS, 30_000),
 
   holdTtlSeconds: int(process.env.HOLD_TTL_SECONDS, 600),
   holdTtlMinSeconds: 5,
