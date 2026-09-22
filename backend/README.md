@@ -71,6 +71,25 @@ that check fails). Same result at 1,000 concurrent requests.
 - Not covered: multiple *servers* racing is exercised by `start:cluster` (up to 8 processes, zero oversell),
   but the load-test UI/CLI drives one target server.
 
+### An industry-tool run (k6)
+
+`scripts/k6-loadtest.js` races the same target using [k6](https://k6.io) instead of the built-in engine —
+useful as a second, independently-recognisable tool alongside the dashboard/GitHub Actions proof, not a
+replacement (k6 fires requests; it doesn't know what "oversell" means for this schema on its own, so the
+script wires k6's `teardown()` to hit `/api/invariants` directly, making it a genuinely self-contained check,
+not just a request-firer):
+
+```bash
+winget install --id GrafanaLabs.k6 -e                    # one-time
+k6 run scripts/k6-loadtest.js                             # 200 VUs at an auto-picked scarce row, localhost:3000
+k6 run -e BASE_URL=https://your-url -e VUS=500 scripts/k6-loadtest.js
+k6 run -e VUS=500 -e BYPASS_SHIELD=false scripts/k6-loadtest.js   # production path (shield stays on)
+```
+
+Prints k6's own summary (granted/sold_out counts, latency percentiles) plus 5 `check()`s read straight from
+the database afterward — a red ✗ on any of them means a real problem, not just "some requests failed".
+Granted holds use a 60 s TTL and self-expire; no manual cleanup needed.
+
 ### The distributed proof (`.github/workflows/distributed-load-test.yml`)
 
 Everything above races one server from one machine. `gh-fire.mjs` + `gh-verify.mjs` (run as a GitHub
