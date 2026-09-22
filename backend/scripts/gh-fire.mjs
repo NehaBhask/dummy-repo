@@ -64,7 +64,17 @@ async function fireOne(i) {
     if (res.ok) return { status: 'success', latency, hold_id: body?.holds?.[0]?.hold_id ?? null, http: res.status };
     return { status: body?.error?.code === 'sold_out' ? 'sold_out' : 'error', latency, http: res.status, code: body?.error?.code };
   } catch (err) {
-    return { status: 'error', latency: performance.now() - start, code: err.message };
+    // fetch() throws a generic "fetch failed" wrapper for any low-level connection failure — the
+    // actual reason (ECONNRESET, ETIMEDOUT, a TLS error, ...) lives one level down in err.cause,
+    // which undici attaches but a bare err.message discards. Capture both so a real network
+    // problem (the tunnel, a dropped socket) is distinguishable from a bug in the app.
+    const cause = err.cause;
+    return {
+      status: 'error',
+      latency: performance.now() - start,
+      code: cause?.code ?? err.code ?? err.message,
+      detail: cause ? `${err.message}: ${cause.code ?? cause.message ?? cause}` : err.message,
+    };
   }
 }
 
