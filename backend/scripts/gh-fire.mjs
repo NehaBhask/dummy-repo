@@ -38,8 +38,16 @@ function percentile(vals, p) {
   return s.length ? Math.round(s[Math.min(s.length - 1, Math.floor(s.length * p))]) : null;
 }
 
+// Idempotency keys must be 8-128 chars (see backend/src/validation.js). A short --tag combined
+// with a low index can fall under that floor (e.g. "cmpA-0" is 6 chars) and the request bounces
+// as a 400 validation_error before it ever reaches the hold logic — silently dropping it from
+// the count instead of a genuine success/sold_out. Padding the index guarantees the floor
+// regardless of --tag length; the real workflow's long ghaction-<run_id>-... tags never hit this,
+// but any shorter --tag (e.g. ad-hoc local testing) otherwise fails silently for early indices.
+const padWidth = Math.max(4, 8 - tag.length - 1);
+
 async function fireOne(i) {
-  const key = `${tag}-${i}`;
+  const key = `${tag}-${String(i).padStart(padWidth, '0')}`;
   const start = performance.now();
   try {
     const res = await fetch(`${baseUrl}/api/holds`, {

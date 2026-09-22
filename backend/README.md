@@ -71,6 +71,38 @@ that check fails). Same result at 1,000 concurrent requests.
 - Not covered: multiple *servers* racing is exercised by `start:cluster` (up to 8 processes, zero oversell),
   but the load-test UI/CLI drives one target server.
 
+### The distributed proof (`.github/workflows/distributed-load-test.yml`)
+
+Everything above races one server from one machine. `gh-fire.mjs` + `gh-verify.mjs` (run as a GitHub
+Actions matrix — see the workflow file) instead race one target from **N separate GitHub-hosted VMs** —
+genuinely different machines and network paths, not simulated concurrency — then `gh-verify.mjs` re-checks
+`/api/invariants` and the actual row afterward rather than trusting the runners' self-reported counts.
+
+- **Requires a public `base_url`.** GitHub's runners can't reach your laptop's `localhost`; use
+  `cloudflared tunnel --url http://localhost:3000` for a quick, free, no-account tunnel (a fresh random
+  URL every time it restarts), or a real deployment for anything longer-lived.
+- **A tunnel is a dev/demo convenience, not something to rely on for the real presentation.** Free
+  quick-tunnels can add their own latency and, under a large burst, occasionally drop a connection — which
+  shows up in a run's `error` count, indistinguishable at a glance from an actual bug. If `error` is ever
+  non-zero, check whether it's `sold_out`/`success` mislabelled vs. a real transport drop before assuming
+  the app is at fault; running against a real deployed URL removes this variable entirely.
+- **`bypass_shield` (workflow input, default on) chooses which path is under test.** On (default): every
+  request skips the in-memory sold-out shield and hits Postgres' row lock directly — the rigorous proof of
+  the *database* guarantee. Off: the production path stays on, including the shield's fast in-memory
+  rejections — measured locally, ~2.2× lower latency for the same 500-request race (500/0/0 either way;
+  1,676 ms total / 1,292 ms p50 with the shield vs. 3,665 ms / 3,299 ms without). Worth running once each
+  way for the demo: same guarantee, two paths, one clearly cheaper.
+- **Matrix jobs aren't millisecond-synchronized across machines.** GitHub queues each runner VM
+  independently, so there's normal queue jitter (seconds, more under GitHub-wide load) before each one
+  picks up its job. Within one runner, `gh-fire.mjs`'s gate pattern still fires a genuine simultaneous
+  burst; across runners it's "several independent bursts landing close together," not laser-aligned —
+  still meaningfully concurrent, just not literally the same microsecond.
+- **`gh-fire.mjs`'s idempotency keys are `<tag>-<padded index>`, padded to stay ≥ 8 chars** (the backend's
+  minimum — see `validation.js`). The real workflow's tags are always long enough on their own
+  (`ghaction-<run_id>-<attempt>-r<index>`); this only matters if you invoke `gh-fire.mjs` directly with a
+  short `--tag` for local testing, where an unpadded low index (e.g. `cmpA-0`, 6 chars) would otherwise
+  bounce as a `400 validation_error` — silently dropped from the count instead of a real success/sold_out.
+
 ### About the latency numbers (read this before tuning)
 
 A 500-request burst that arrives in the *same instant* shows p50 ≈ 0.8 s, total ≈ 1.3 s on the dev rig

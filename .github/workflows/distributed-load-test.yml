@@ -29,6 +29,11 @@ on:
         description: "Requests each runner fires"
         required: false
         default: "100"
+      bypass_shield:
+        description: "Bypass the in-memory sold-out shield (test Postgres' row lock directly). Uncheck to test the production-path shield instead — run it once each way for the full story."
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   plan:
@@ -45,8 +50,11 @@ jobs:
           INVENTORY_ID: ${{ inputs.inventory_id }}
           RUNNERS: ${{ inputs.runners }}
           REQUESTS_PER_RUNNER: ${{ inputs.requests_per_runner }}
+          BYPASS_SHIELD: ${{ inputs.bypass_shield }}
         run: |
           set -euo pipefail
+          MODE="shield bypassed (raw Postgres row lock)"
+          [ "$BYPASS_SHIELD" = "false" ] && MODE="shield enabled (production path)"
           INV="$INVENTORY_ID"
           if [ -z "$INV" ]; then
             INV=$(curl -sf "$BASE_URL/api/inventory/contended?limit=1" | jq -r '.inventory[0].inventory_id')
@@ -76,6 +84,7 @@ jobs:
             echo "- inventory_id: \`$INV\`"
             echo "- free units before the storm: **$FREE**"
             echo "- $N independent runners x $REQUESTS_PER_RUNNER requests = **$TOTAL total requests**"
+            echo "- mode: **$MODE**"
           } >> "$GITHUB_STEP_SUMMARY"
 
   fire:
@@ -91,13 +100,18 @@ jobs:
         with:
           node-version: 20
       - name: Fire requests from this runner (independent machine #${{ matrix.index }})
+        env:
+          BYPASS_SHIELD: ${{ inputs.bypass_shield }}
         run: |
+          SHIELD_FLAG=""
+          [ "$BYPASS_SHIELD" = "false" ] && SHIELD_FLAG="--shield"
           node backend/scripts/gh-fire.mjs \
             --base-url "${{ inputs.base_url }}" \
             --inventory "${{ needs.plan.outputs.inventory_id }}" \
             --requests "${{ inputs.requests_per_runner }}" \
             --tag "${{ needs.plan.outputs.tag }}-r${{ matrix.index }}" \
-            --out result.json
+            --out result.json \
+            $SHIELD_FLAG
       - uses: actions/upload-artifact@v4
         with:
           name: result-${{ matrix.index }}
