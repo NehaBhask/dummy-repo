@@ -29,15 +29,32 @@ const arg = (name, dflt) => {
 
 const baseUrl = arg('base-url', 'http://localhost:3000');
 const abortMs = Number(arg('abort-ms', 30));
-const runs = Number(arg('runs', 8));
+const requestedRuns = Number(arg('runs', 8));
+const runsExplicit = args.includes('--runs');
 const units = Number(arg('units', 1));
 let inventoryId = arg('inventory');
+const inventoryExplicit = Boolean(inventoryId);
 
 if (!inventoryId) {
-  const r = await fetch(`${baseUrl}/api/inventory/contended?limit=1`).then((res) => res.json());
-  inventoryId = r.inventory?.[0]?.inventory_id;
+  // This test creates `runs` SEPARATE holds (one per run) — it needs a room with plenty of spare
+  // capacity, the opposite of what /api/inventory/contended returns (that endpoint is built to
+  // find the SCARCEST rows in the whole dataset for the race tests; reusing it here always landed
+  // on a 1-unit room, no matter how it was sorted). Search a few known-bookable cities instead and
+  // pick whichever room currently has the most free units.
+  const CITIES = ['Jaipur', 'Agra', 'Udaipur', 'Varanasi', 'Jaisalmer', 'Kolkata', 'New Delhi'];
+  const checkIn = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10); // a week out, inside the seeded window
+  let best = null;
+  for (const city of CITIES) {
+    const r = await fetch(`${baseUrl}/api/search/hotels?city=${encodeURIComponent(city)}&check_in=${checkIn}&nights=1&limit=10`).then((res) => res.json());
+    for (const card of r.results ?? []) {
+      for (const room of card.rooms) {
+        if (!best || room.available_units > best.free) best = { inventory_id: room.inventory[0].inventory_id, free: room.available_units };
+      }
+    }
+  }
+  inventoryId = best?.inventory_id;
   if (!inventoryId) {
-    console.error('no contended inventory row found — pass --inventory explicitly');
+    console.error('no bookable room found across the usual cities — pass --inventory explicitly');
     process.exit(2);
   }
 }
@@ -70,7 +87,24 @@ async function attempt(key, { abort }) {
 }
 
 const before = await fetch(`${baseUrl}/api/inventory/${inventoryId}`).then((r) => r.json());
-console.log(`target: ${inventoryId}  (${before.total_units} total, ${before.total_units - before.booked_units - before.held_units} free)`);
+const free = before.total_units - before.booked_units - before.held_units;
+console.log(`target: ${inventoryId}  (${before.total_units} total, ${free} free)`);
+
+// This test needs `runs` SEPARATE holds worth of capacity (it is not racing everyone for one
+// unit) — checked up front so a too-small row fails clearly, before wasting requests, instead of
+// producing a wall of "sold_out" that looks like a broken guarantee but is just an undersized target.
+let runs = requestedRuns;
+if (free < requestedRuns) {
+  if (runsExplicit || inventoryExplicit) {
+    console.error(
+      `\n${inventoryId} only has ${free} free unit(s), but --runs ${requestedRuns} needs one hold each.\n` +
+        `Lower --runs to ${free} or fewer, or point --inventory at a room with more free units.`,
+    );
+    process.exit(2);
+  }
+  runs = Math.max(1, free);
+  console.log(`(only ${free} free here, and --runs wasn't set explicitly — running ${runs} instead of the default ${requestedRuns})`);
+}
 console.log(`simulating a dropped response with a ${abortMs}ms client-side abort, then a normal retry — ${runs} run(s)\n`);
 
 let caughtMidFlight = 0;

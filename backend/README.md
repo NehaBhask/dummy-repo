@@ -88,6 +88,26 @@ gh workflow run distributed-idempotency-test.yml -f base_url=https://your-url -f
 Verified locally first (see commit): 5 separate processes x 20 attempts each, same key, same target — 100
 total attempts, 1 original write, 99 replays, 1 distinct `hold_id`, exactly 1 unit consumed.
 
+### The network-retry idempotency test (`.github/workflows/network-retry-test.yml`)
+
+The two proofs above cover *concurrent* retries (many machines, same key, at once). This one covers the
+different, sequential case your design doc names explicitly: a client sends a request, the server fully
+processes it, but the **response** never arrives back (dropped connection, flaky mobile data) — so the client,
+not knowing whether it worked, retries. `scripts/simulate-network-retry.mjs` approximates the dropped response
+with a short client-side abort (a real TCP-level drop needs OS tooling like `tc netem`/toxiproxy, out of scope
+here) and honestly reports which sub-case actually happened each run — server had already finished (a true
+replay) vs. the abort landed before anything was recorded (retry did the original work) — since real timing
+can't be perfectly controlled from a script. Either way, exactly one hold must exist per run, never two.
+
+Needs a room with **at least as many free units as `--runs`** (each run creates its own hold, it isn't racing
+for one shared unit) — auto-pick searches a few known-bookable cities for a well-stocked room by default, and
+fails clearly instead of running if an explicitly-given `--inventory`/`--runs` combination doesn't fit.
+
+```bash
+node scripts/simulate-network-retry.mjs --runs 8 --abort-ms 5                          # local
+gh workflow run network-retry-test.yml -f base_url=https://your-url -f runs=8          # via GitHub Actions
+```
+
 ### An industry-tool run (k6)
 
 `scripts/k6-loadtest.js` races the same target using [k6](https://k6.io) instead of the built-in engine —
