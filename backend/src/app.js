@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
+import morgan from 'morgan';
 import { ZodError } from 'zod';
 import { config } from './config.js';
 import { AppError, fromPgError, localise, pickLang } from './errors.js';
@@ -11,6 +12,8 @@ import { buildRouter } from './routes.js';
 export function createApp({ worker } = {}) {
   const app = express();
   app.disable('x-powered-by');
+  // Skippable under load tests (LOG_REQUESTS=off) so a 500-way race doesn't flood the terminal.
+  if (config.env !== 'test' && process.env.LOG_REQUESTS !== 'off') app.use(morgan('dev'));
   app.use(cors({ origin: config.corsOrigin, exposedHeaders: ['Idempotent-Replayed'] }));
   app.use(express.json({ limit: '100kb' }));
   app.use((req, _res, next) => {

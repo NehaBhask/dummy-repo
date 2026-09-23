@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+ #!/usr/bin/env node
 // Simulates the exact scenario idempotency exists to protect against: a client sends a booking
 // request, the SERVER receives and fully processes it, but the RESPONSE never reaches the client
 // (dropped connection, timeout, flaky mobile data) — so the client, not knowing whether it
