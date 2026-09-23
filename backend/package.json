@@ -1,0 +1,28 @@
+{
+  "name": "kognivera-backend",
+  "version": "0.1.0",
+  "description": "APS-05 booking & inventory service: holds, idempotent bookings, saga compensation, cancellation restock, load-test engine",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "build:web": "npm --prefix ../frontend install && npm --prefix ../frontend run build",
+    "start:cluster": "node src/cluster.js",
+    "dev": "node --watch src/index.js",
+    "migrate": "node scripts/migrate.js",
+    "invariants": "node scripts/invariants.js",
+    "loadtest": "node scripts/loadtest.js",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\""
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^18.0.1",
+    "express": "^5.2.1",
+    "pg": "^8.23.0",
+    "zod": "^4.6.5"
+  }
+}

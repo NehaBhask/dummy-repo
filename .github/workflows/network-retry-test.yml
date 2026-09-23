@@ -1,0 +1,50 @@
+name: Network-retry idempotency test (dropped response, safe retry)
+
+# Manually triggered. Unlike the other two workflows (many separate machines racing), this is the
+# single-client, sequential case: a request is sent, the server processes it, but the client
+# never sees the response (dropped connection, flaky mobile data) — so it retries the same
+# idempotency key not knowing whether the first attempt worked. Runs scripts/simulate-network-retry.mjs
+# once, on one runner, since the property being tested is inherently about one client, not many.
+#
+# Prerequisite: base_url must be reachable from the internet (see distributed-load-test.yml).
+#
+# Run it: Actions tab -> "Network-retry idempotency test" -> Run workflow, or:
+#   gh workflow run network-retry-test.yml -f base_url=https://your-app
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Public URL of the running backend (e.g. https://xyz.trycloudflare.com)"
+        required: true
+      inventory_id:
+        description: "Target inventory_id (blank = auto-pick a well-stocked room; needs >= runs free units)"
+        required: false
+      runs:
+        description: "How many simulated drop-then-retry cycles to run"
+        required: false
+        default: "8"
+      abort_ms:
+        description: "Client-side abort window in ms (shorter = more likely to catch the server mid-flight)"
+        required: false
+        default: "5"
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Simulate a dropped response, then retry
+        env:
+          INVENTORY_ID: ${{ inputs.inventory_id }}
+        run: |
+          INV_FLAG=""
+          [ -n "$INVENTORY_ID" ] && INV_FLAG="--inventory $INVENTORY_ID"
+          node backend/scripts/simulate-network-retry.mjs \
+            --base-url "${{ inputs.base_url }}" \
+            $INV_FLAG \
+            --runs "${{ inputs.runs }}" \
+            --abort-ms "${{ inputs.abort_ms }}" | tee -a "$GITHUB_STEP_SUMMARY"

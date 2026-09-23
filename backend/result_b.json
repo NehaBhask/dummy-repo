@@ -1,0 +1,16 @@
+{
+  "tag": "runB",
+  "base_url": "http://localhost:3115",
+  "inventory_id": "inv_922c3585",
+  "requests": 500,
+  "race_ms": 1676,
+  "success": 0,
+  "sold_out": 500,
+  "error": 0,
+  "granted_hold_ids": [],
+  "latency_ms": {
+    "p50": 1292,
+    "p99": 1485
+  },
+  "errors_sample": []
+}

@@ -1,0 +1,139 @@
+name: Distributed load test (zero-oversell proof)
+
+# Manually triggered. Fires booking requests at a RUNNING, PUBLICLY REACHABLE Kognivera backend
+# from several independent GitHub-hosted runners at once — genuinely different machines and
+# network paths, not one process on one laptop — then checks the database's own invariants and
+# restocks the room afterwards.
+#
+# Prerequisite: base_url must be reachable from the internet. A backend on your own laptop's
+# localhost is NOT reachable by these runners — use a tunnel (e.g. `cloudflared tunnel --url
+# http://localhost:3000`) for a quick test, or your deployed URL (Railway, etc.) for the real thing.
+#
+# Run it: Actions tab -> "Distributed load test" -> Run workflow, or:
+#   gh workflow run distributed-load-test.yml -f base_url=https://your-app -f runners=5 -f requests_per_runner=100
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Public URL of the running backend (e.g. https://xyz.trycloudflare.com)"
+        required: true
+      inventory_id:
+        description: "Target inventory_id to race for (blank = auto-pick the scarcest available room)"
+        required: false
+      runners:
+        description: "Number of independent runners (separate GitHub Actions machines)"
+        required: false
+        default: "5"
+      requests_per_runner:
+        description: "Requests each runner fires"
+        required: false
+        default: "100"
+      bypass_shield:
+        description: "Bypass the in-memory sold-out shield (test Postgres' row lock directly). Uncheck to test the production-path shield instead — run it once each way for the full story."
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      inventory_id: ${{ steps.plan.outputs.inventory_id }}
+      initial_free: ${{ steps.plan.outputs.initial_free }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - id: plan
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          INVENTORY_ID: ${{ inputs.inventory_id }}
+          RUNNERS: ${{ inputs.runners }}
+          REQUESTS_PER_RUNNER: ${{ inputs.requests_per_runner }}
+          BYPASS_SHIELD: ${{ inputs.bypass_shield }}
+        run: |
+          set -euo pipefail
+          MODE="shield bypassed (raw Postgres row lock)"
+          [ "$BYPASS_SHIELD" = "false" ] && MODE="shield enabled (production path)"
+          INV="$INVENTORY_ID"
+          if [ -z "$INV" ]; then
+            INV=$(curl -sf "$BASE_URL/api/inventory/contended?limit=1" | jq -r '.inventory[0].inventory_id')
+          fi
+          if [ -z "$INV" ] || [ "$INV" = "null" ]; then
+            echo "::error::could not resolve a target inventory_id (is the backend reachable and seeded?)"
+            exit 1
+          fi
+          FREE=$(curl -sf "$BASE_URL/api/inventory/$INV" | jq -r '.total_units - .booked_units - .held_units')
+          TAG="ghaction-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          N="$RUNNERS"
+          arr="["
+          for i in $(seq 0 $((N - 1))); do arr="$arr$i,"; done
+          arr="${arr%,}]"
+
+          {
+            echo "matrix=$arr"
+            echo "inventory_id=$INV"
+            echo "initial_free=$FREE"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          TOTAL=$((N * REQUESTS_PER_RUNNER))
+          {
+            echo "### Target"
+            echo "- inventory_id: \`$INV\`"
+            echo "- free units before the storm: **$FREE**"
+            echo "- $N independent runners x $REQUESTS_PER_RUNNER requests = **$TOTAL total requests**"
+            echo "- mode: **$MODE**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  fire:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        index: ${{ fromJson(needs.plan.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fire requests from this runner (independent machine #${{ matrix.index }})
+        env:
+          BYPASS_SHIELD: ${{ inputs.bypass_shield }}
+        run: |
+          SHIELD_FLAG=""
+          [ "$BYPASS_SHIELD" = "false" ] && SHIELD_FLAG="--shield"
+          node backend/scripts/gh-fire.mjs \
+            --base-url "${{ inputs.base_url }}" \
+            --inventory "${{ needs.plan.outputs.inventory_id }}" \
+            --requests "${{ inputs.requests_per_runner }}" \
+            --tag "${{ needs.plan.outputs.tag }}-r${{ matrix.index }}" \
+            --out result.json \
+            $SHIELD_FLAG
+      - uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.index }}
+          path: result.json
+
+  verify:
+    needs: [plan, fire]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+      - name: Verify the invariant and restock the room
+        run: |
+          node backend/scripts/gh-verify.mjs \
+            --base-url "${{ inputs.base_url }}" \
+            --inventory "${{ needs.plan.outputs.inventory_id }}" \
+            --initial-free "${{ needs.plan.outputs.initial_free }}" \
+            --results-dir results \
+            --release | tee -a "$GITHUB_STEP_SUMMARY"
