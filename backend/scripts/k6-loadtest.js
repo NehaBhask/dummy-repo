@@ -21,6 +21,7 @@ const TAG = `k6-${Date.now()}`;
 const granted = new Counter('holds_granted');
 const soldOut = new Counter('holds_sold_out');
 const otherError = new Counter('holds_other_error');
+const networkError = new Counter('holds_network_error'); // never reached the server (see default())
 const holdLatency = new Trend('hold_latency_ms', true);
 
 export const options = {
@@ -66,6 +67,11 @@ export default function (data) {
   if (res.status === 201 || res.status === 200) {
     granted.add(1);
     check(res, { 'hold granted': (r) => JSON.parse(r.body).holds?.[0]?.hold_id != null });
+  } else if (res.status === 0 || res.body == null) {
+    // Never reached the server at all (connection refused/reset/timeout) — res.body is null here,
+    // so res.json() would throw. This is a transport failure, not an application response; tag it
+    // distinctly rather than let an uncaught exception spam the console for every occurrence.
+    networkError.add(1);
   } else {
     const code = res.json('error.code');
     if (code === 'sold_out') soldOut.add(1);

@@ -71,6 +71,23 @@ that check fails). Same result at 1,000 concurrent requests.
 - Not covered: multiple *servers* racing is exercised by `start:cluster` (up to 8 processes, zero oversell),
   but the load-test UI/CLI drives one target server.
 
+### The distributed idempotency proof (`.github/workflows/distributed-idempotency-test.yml`)
+
+`distributed-load-test.yml` uses a **unique** key per request (proves correct serialization under
+contention). This one instead has every runner fire its attempts using the **identical** idempotency key —
+the "many genuinely separate machines all retrying the same logical action at once" test, simulating a
+flaky network's retries or two devices racing on one action for real, not one script calling twice.
+`gh-idempotency-verify.mjs` checks the one thing that matters: across every attempt from every machine,
+exactly one `hold_id` was ever returned, and exactly one hold's worth of units was consumed — regardless of
+how many hundred attempts raced for it.
+
+```bash
+gh workflow run distributed-idempotency-test.yml -f base_url=https://your-url -f runners=5 -f attempts_per_runner=20
+```
+
+Verified locally first (see commit): 5 separate processes x 20 attempts each, same key, same target — 100
+total attempts, 1 original write, 99 replays, 1 distinct `hold_id`, exactly 1 unit consumed.
+
 ### An industry-tool run (k6)
 
 `scripts/k6-loadtest.js` races the same target using [k6](https://k6.io) instead of the built-in engine —

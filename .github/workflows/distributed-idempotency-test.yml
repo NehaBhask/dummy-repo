@@ -1,0 +1,125 @@
+name: Distributed idempotency test (retries never double-book)
+
+# Manually triggered. Unlike distributed-load-test.yml (unique keys, proves correct serialization
+# under contention), every runner here fires its attempts using the SAME idempotency key — the
+# "many genuinely separate machines all retrying the identical action at once" test. Simulates a
+# flaky network causing retries, or two devices racing on one logical action, for real, from
+# separate GitHub-hosted machines, not one script calling twice in a row.
+#
+# Prerequisite: base_url must be reachable from the internet (see distributed-load-test.yml).
+#
+# Run it: Actions tab -> "Distributed idempotency test" -> Run workflow, or:
+#   gh workflow run distributed-idempotency-test.yml -f base_url=https://your-app
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Public URL of the running backend (e.g. https://xyz.trycloudflare.com)"
+        required: true
+      inventory_id:
+        description: "Target inventory_id (blank = auto-pick a scarce room; units consumed = 1 regardless)"
+        required: false
+      runners:
+        description: "Number of independent runners (separate GitHub Actions machines)"
+        required: false
+        default: "5"
+      attempts_per_runner:
+        description: "Concurrent attempts each runner fires, all using the same idempotency key"
+        required: false
+        default: "20"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      inventory_id: ${{ steps.plan.outputs.inventory_id }}
+      initial_free: ${{ steps.plan.outputs.initial_free }}
+      shared_key: ${{ steps.plan.outputs.shared_key }}
+    steps:
+      - id: plan
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          INVENTORY_ID: ${{ inputs.inventory_id }}
+          RUNNERS: ${{ inputs.runners }}
+        run: |
+          set -euo pipefail
+          INV="$INVENTORY_ID"
+          if [ -z "$INV" ]; then
+            INV=$(curl -sf "$BASE_URL/api/inventory/contended?limit=1" | jq -r '.inventory[0].inventory_id')
+          fi
+          if [ -z "$INV" ] || [ "$INV" = "null" ]; then
+            echo "::error::could not resolve a target inventory_id (is the backend reachable and seeded?)"
+            exit 1
+          fi
+          FREE=$(curl -sf "$BASE_URL/api/inventory/$INV" | jq -r '.total_units - .booked_units - .held_units')
+          # One key, shared by every runner and every attempt within it — the whole point of this test.
+          KEY="idem-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          N="$RUNNERS"
+          arr="["
+          for i in $(seq 0 $((N - 1))); do arr="$arr$i,"; done
+          arr="${arr%,}]"
+
+          {
+            echo "matrix=$arr"
+            echo "inventory_id=$INV"
+            echo "initial_free=$FREE"
+            echo "shared_key=$KEY"
+          } >> "$GITHUB_OUTPUT"
+
+          TOTAL=$((N * ${{ inputs.attempts_per_runner }}))
+          {
+            echo "### Target"
+            echo "- inventory_id: \`$INV\`  (free: $FREE)"
+            echo "- shared idempotency key: \`$KEY\`"
+            echo "- $N independent runners x ${{ inputs.attempts_per_runner }} attempts = **$TOTAL total attempts, all the same key**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  fire:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        index: ${{ fromJson(needs.plan.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fire attempts from this runner (independent machine #${{ matrix.index }})
+        run: |
+          node backend/scripts/gh-idempotency-fire.mjs \
+            --base-url "${{ inputs.base_url }}" \
+            --inventory "${{ needs.plan.outputs.inventory_id }}" \
+            --key "${{ needs.plan.outputs.shared_key }}" \
+            --attempts "${{ inputs.attempts_per_runner }}" \
+            --tag "r${{ matrix.index }}" \
+            --out result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.index }}
+          path: result.json
+
+  verify:
+    needs: [plan, fire]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+      - name: Verify exactly one hold was ever created
+        run: |
+          node backend/scripts/gh-idempotency-verify.mjs \
+            --base-url "${{ inputs.base_url }}" \
+            --inventory "${{ needs.plan.outputs.inventory_id }}" \
+            --initial-free "${{ needs.plan.outputs.initial_free }}" \
+            --results-dir results \
+            --release | tee -a "$GITHUB_STEP_SUMMARY"
