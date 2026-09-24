@@ -5,7 +5,7 @@ import { pool } from '../backend/src/db.js';
 import { config } from '../backend/src/config.js';
 import { AppError } from '../backend/src/errors.js';
 import { newId } from '../backend/src/ids.js';
-import { searchHotels } from '../backend/src/modules/inventory/search.js';
+import { flightRoutes, searchFlights, searchHotels } from '../backend/src/modules/inventory/search.js';
 
 /*
  * Natural-language search: text (English or Hindi) → structured params → the SAME grounded SQL
@@ -27,6 +27,8 @@ const render = (template, vars) => template.trim().replace(/\{\{(\w+)\}\}/g, (_,
 const TOOL = JSON.parse(readPrompt('search_hotels.tool.json'));
 const SEARCH_SYSTEM_PROMPT = readPrompt('search_system.md');
 const SUMMARISE_PROMPT = readPrompt('summarise.md');
+const FLIGHT_TOOL = JSON.parse(readPrompt('search_flights.tool.json'));
+const FLIGHT_SYSTEM_PROMPT = readPrompt('search_flights_system.md');
 
 const cache = new Map(); // normalised query → parsed params (also serves as the pre-cached demo path)
 const cities = { at: 0, names: [] };
@@ -48,8 +50,8 @@ export function primeCache(query, params) {
 }
 const normalise = (q) => q.trim().toLowerCase().replace(/\s+/g, ' ');
 
-// The exact "Try:" example queries shown in the UI (frontend/src/locales/{en,hi}.json), pre-answered
-// so the live demo's opening beat never depends on Gemini being reachable at pitch time. A healthy
+// The five demo queries (also kept as search.example1-3 in frontend/src/locales/{en,hi}.json), pre-answered
+// so the live demo's opening beat (paste one exactly) never depends on Gemini being reachable at pitch time. A healthy
 // Gemini is never consulted for these — cache is checked first in aiSearch() — but that's fine: the
 // params below are what Gemini would return anyway, just guaranteed instead of best-effort.
 export function seedDemoQueries() {
@@ -117,14 +119,9 @@ const CITY_ALIASES = {
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const SYMBOLS = { '₹': 'INR', rs: 'INR', inr: 'INR', $: 'USD', usd: 'USD', '€': 'EUR', eur: 'EUR', '£': 'GBP', gbp: 'GBP' };
 
-/** English-only fallback. Deliberately small: it exists to keep the demo alive, not to compete. */
-export function parseHeuristic(text, today, names) {
-  const t = text.toLowerCase();
+/** "Oct 10-12", "10 Oct", "2026-11-03" → { check_in_date, nights? }. A date that has passed rolls to next year. */
+function extractDates(t, today) {
   const out = {};
-  out.city =
-    [...names].sort((a, b) => b.length - a.length).find((n) => new RegExp(`\\b${n.toLowerCase()}\\b`).test(t)) ??
-    Object.entries(CITY_ALIASES).find(([alias, name]) => new RegExp(`\\b${alias}\\b`).test(t) && names.includes(name))?.[1];
-
   const year = Number(today.slice(0, 4));
   const iso = t.match(/(\d{4}-\d{2}-\d{2})/);
   const range = t.match(new RegExp(`\\b(${MONTHS.join('|')})[a-z]*\\.?\\s+(\\d{1,2})\\s*(?:-|–|to)\\s*(\\d{1,2})\\b`));
@@ -143,6 +140,18 @@ export function parseHeuristic(text, today, names) {
     const [month, day] = MONTHS.includes(single[1]) ? [single[1], single[2]] : [single[2], single[1]];
     out.check_in_date = toDate(MONTHS.indexOf(month), Number(day));
   }
+  return out;
+}
+
+/** English-only fallback. Deliberately small: it exists to keep the demo alive, not to compete. */
+export function parseHeuristic(text, today, names) {
+  const t = text.toLowerCase();
+  const out = {};
+  out.city =
+    [...names].sort((a, b) => b.length - a.length).find((n) => new RegExp(`\\b${n.toLowerCase()}\\b`).test(t)) ??
+    Object.entries(CITY_ALIASES).find(([alias, name]) => new RegExp(`\\b${alias}\\b`).test(t) && names.includes(name))?.[1];
+
+  Object.assign(out, extractDates(t, today));
 
   out.nights ??= Number(t.match(/(\d+)\s*nights?/)?.[1]) || undefined;
   out.rooms = Number(t.match(/(\d+)\s*rooms?/)?.[1]) || undefined;
@@ -287,6 +296,120 @@ export async function aiSearch({ query, currency }) {
     total: found.total,
     results: found.results,
     ...(found.total === 0 ? await noResultsHint(raw.city) : {}),
+  };
+}
+
+/* ------------------------------ flights ------------------------------ */
+
+async function parseFlightsWithGemini(text, today, names) {
+  const json = await callGemini({
+    systemInstruction: { parts: [{ text: render(FLIGHT_SYSTEM_PROMPT, { today, cities: names.join(', ') }) }] },
+    contents: [{ role: 'user', parts: [{ text }] }],
+    tools: [{ functionDeclarations: [FLIGHT_TOOL] }],
+    toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['search_flights'] } },
+  });
+  const call = json.candidates?.[0]?.content?.parts?.find((p) => p.functionCall)?.functionCall;
+  if (!call?.args) throw new Error('gemini returned no function call');
+  Object.defineProperty(call.args, '__model', { value: json.__model, enumerable: false });
+  return call.args;
+}
+
+/** English-only fallback for flights: "Bengaluru to Jaipur on Nov 4 for 2 seats", "from Kochi to Agra tomorrow". */
+export function parseFlightHeuristic(text, today, names) {
+  const t = text.toLowerCase();
+  const out = {};
+
+  // every city mention (real names first, longest first so "New Delhi" beats "Delhi"), without overlaps
+  const spans = [];
+  const claim = (name, re) => {
+    for (const m of t.matchAll(re)) {
+      const [a, b] = [m.index, m.index + m[0].length];
+      if (!spans.some((s) => a < s.b && b > s.a)) spans.push({ name, a, b });
+    }
+  };
+  for (const n of [...names].sort((x, y) => y.length - x.length)) claim(n, new RegExp(`\\b${n.toLowerCase()}\\b`, 'g'));
+  for (const [alias, name] of Object.entries(CITY_ALIASES)) if (names.includes(name)) claim(name, new RegExp(`\\b${alias}\\b`, 'g'));
+  spans.sort((x, y) => x.a - y.a);
+
+  for (const s of spans) {
+    const before = t.slice(0, s.a);
+    if (/\bfrom\s+$/.test(before)) out.origin ??= s.name;
+    else if (/\b(?:to|for|towards|into)\s+$/.test(before) || /→\s*$/.test(before)) out.destination ??= s.name;
+  }
+  const rest = spans.filter((s) => s.name !== out.origin && s.name !== out.destination);
+  if (!out.origin && !out.destination && spans.length >= 2) [out.origin, out.destination] = [spans[0].name, spans[1].name];
+  else if (!out.destination && (out.origin ? rest[0] : spans[0])) out.destination = (out.origin ? rest[0] : spans[0]).name;
+  else if (!out.origin && rest[0]) out.origin = rest[0].name;
+
+  const d = extractDates(t, today).check_in_date;
+  if (d) out.date = d;
+  else if (/\btomorrow\b/.test(t)) out.date = addDays(today, 1);
+  out.seats = Number(t.match(/(\d+)\s*(?:seats?|passengers?|travell?ers?|people|persons?|adults?)/)?.[1]) || undefined;
+  return out;
+}
+
+export async function aiFlightSearch({ query, currency }) {
+  const started = Date.now();
+  const today = isoDate(new Date());
+  const names = await cityNames();
+  const language = /[ऀ-ॿ]/.test(query) ? 'hi' : 'en-IN';
+  const key = `flights:${normalise(query)}`;
+
+  let raw = cache.get(key);
+  let parser = raw ? 'cache' : null;
+  let fallbackReason = null;
+  if (!raw && config.gemini.apiKey) {
+    try {
+      raw = await parseFlightsWithGemini(query, today, names);
+      parser = 'gemini';
+    } catch (err) {
+      fallbackReason = err.message;
+    }
+  }
+  if (!raw) {
+    if (language === 'hi' && !config.gemini.apiKey) {
+      throw new AppError('ai_unavailable', { details: { reason: 'Hindi queries need GEMINI_API_KEY' } });
+    }
+    raw = parseFlightHeuristic(query, today, names);
+    parser = 'heuristic';
+  }
+  if (parser === 'gemini') cache.set(key, raw);
+
+  const canon = (v) => names.find((n) => n.toLowerCase() === String(v ?? '').toLowerCase());
+  const origin = canon(raw.origin);
+  const destination = canon(raw.destination);
+  const seats = clamp(raw.seats ?? 1, 1, 6);
+  const base = { kind: 'flights', language, parser, model: raw.__model, fallback_reason: fallbackReason, parsed_params: raw };
+
+  if (!destination || !origin) {
+    // Say what is missing instead of guessing a route; offer the real origins when only the destination is known.
+    const origins = destination ? (await flightRoutes({ destination })).map((r) => r.origin).filter((o) => o !== destination) : [];
+    return { ...base, search_params: { origin, destination, seats }, needs_clarification: destination ? 'origin' : 'destination', origins, results: [], total: 0 };
+  }
+
+  const routes = await flightRoutes({ origin, destination });
+  const route = routes[0];
+  const wanted = /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date ?? '')) ? raw.date : null;
+  const date = wanted ?? route?.dates.find((d) => d >= today) ?? route?.dates[0] ?? today;
+  const found = route ? await searchFlights({ origin, destination, date, seats, currency }) : { results: [], total: 0, currency: currency ?? null, fx_rate_date: null };
+
+  await pool
+    .query(
+      `INSERT INTO search_logs (log_id, raw_query, language, parser, parsed_params, result_count, latency_ms, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+      [newId('slg'), query, language, parser, JSON.stringify(raw), found.total ?? found.results.length, Date.now() - started],
+    )
+    .catch((err) => console.error('[ai] search_logs insert failed:', err.message));
+
+  const total = found.total ?? found.results.length;
+  return {
+    ...base,
+    search_params: { origin, destination, date, seats },
+    currency: found.currency,
+    fx_rate_date: found.fx_rate_date,
+    total,
+    results: found.results,
+    ...(total === 0 ? { no_results_reason: route ? 'no_flights_on_date' : 'no_route', available_dates: route?.dates.slice(0, 8) ?? [] } : {}),
   };
 }
 

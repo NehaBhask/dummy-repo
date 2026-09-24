@@ -21,7 +21,7 @@ can be refreshed and shared. Old `#/search`-style links redirect.
 
 | Route | What it shows |
 |---|---|
-| `/` **Home** | Hotels / Flights switcher with a structured search bar; AI search box (English/Hindi, "Powered by AI") with the cached **Try:** example chips; popular destinations with the real cheapest stay |
+| `/` **Home** | Hotels / Flights switcher with one manual search bar. **AI search** (a pill at the top-left of the Where / To box, on both Hotels and Flights) swaps it for a natural-language bar (English/Hindi). On Flights, if the chosen route/date has no seats the search button is disabled and says so; popular destinations with the real cheapest stay |
 | `/search` **Results** | Filters (city, dates, price slider, rating, breakfast / free cancellation, sort) that live in the URL; hotel cards with low-stock badges; flight results. `?q=` runs the AI search and shows what was understood and which parser answered |
 | `/hotel/:id` **Stay** | Room and rate-plan selection, exact price breakdown incl. 12% tax, "only N left" warning, **Add to trip** (holds nothing) |
 | `/hold` **My trip** | Items added so far (hotel + flight), one **Reserve** that holds them all atomically under a single deadline, countdown banner (pulses under 60 s), release/expired recovery, **Card / UPI** with client-side validation. **Pay now** stays locked until the trip is reserved, then runs the real saga |
@@ -44,6 +44,8 @@ a dummy card for the mock gateway.
 - **Money is never a float:** the tax breakdown uses integer minor units (`src/lib/money.js`, mirrors the backend's 12%
   rule); the server's total at confirm time is authoritative and matched the estimate in testing.
 - **Cart, then one reservation:** drafts hold nothing; Reserve is a single `POST /api/holds` over every item, so all holds share one `expires_at`. Holds are matched back to items by `inventory_id`, never by position. Changing a reserved trip releases the reservation, so active items can never carry different deadlines; a sold-out item fails the whole request and is named.
+- **Rooms:** the hotel page searches availability for 1 room and has a Rooms stepper capped at the free count; prices are scaled from the 1-room price (the server bills price × units) and the hold requests that many units. Home has a Rooms field too.
+- **Mock login:** `session.jsx` keeps the signed-in persona (or `operator`) in per-tab `sessionStorage` and `api.js` sends it as `X-User-Id`; trips are stored per user. `LoginPage` (10 seeded travellers + operator) gates the app; `OpsPage` is the operator dashboard (polls every 2 s, Reset demo). Demo identity only, not real auth.
 - **Idempotency:** each user action gets one key (`newKey`) and re-uses it on retry; a changed checkout payload gets a new key.
 - **Payment form:** a mock gateway — card fields are validated in the browser and never sent; only the method is.
 - **State:** `context.jsx` (config, currency, toasts), `router.jsx`, `trip.jsx` (holds + last outcome, persisted to

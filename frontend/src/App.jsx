@@ -1,10 +1,12 @@
-import { useState } from 'react';
-import { CalendarDays, Compass, Gauge, Luggage, Menu, Radar, Settings2, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Activity, CalendarDays, Compass, Gauge, LogOut, Luggage, Menu, Radar, Settings2, X } from 'lucide-react';
 import { useApp } from './context.jsx';
 import { useI18n } from './i18n.jsx';
+import { useSession } from './session.jsx';
 import { useTrip } from './trip.jsx';
 import { Link, matchPath, useRouter } from './router.jsx';
 import { Countdown, Empty, Spinner } from './components/ui.jsx';
+import LoginPage from './pages/LoginPage.jsx';
 import HomePage from './pages/HomePage.jsx';
 import SearchPage from './pages/SearchPage.jsx';
 import HotelPage from './pages/HotelPage.jsx';
@@ -13,15 +15,22 @@ import ConfirmationPage from './pages/ConfirmationPage.jsx';
 import BookingsPage from './pages/BookingsPage.jsx';
 import VisualizerPage from './pages/VisualizerPage.jsx';
 import LoadTestPage from './pages/LoadTestPage.jsx';
+import OpsPage from './pages/OpsPage.jsx';
 
-const NAV = [
+const TRAVELLER_NAV = [
   { to: '/', key: 'nav.explore', icon: Compass, on: (p) => p === '/' || p.startsWith('/search') || p.startsWith('/hotel') },
   { to: '/hold', key: 'nav.trip', icon: Luggage, on: (p) => p === '/hold' || p.startsWith('/confirmation'), trip: true },
   { to: '/bookings', key: 'nav.bookings', icon: CalendarDays, on: (p) => p === '/bookings' },
   { to: '/visualizer', key: 'nav.visualizer', icon: Radar, on: (p) => p === '/visualizer' },
   { to: '/loadtest', key: 'nav.loadtest', icon: Gauge, on: (p) => p === '/loadtest' },
 ];
-const OPS_PATHS = ['/visualizer', '/loadtest'];
+const OPERATOR_NAV = [
+  { to: '/ops', key: 'nav.ops', icon: Activity, on: (p) => p === '/ops' },
+  { to: '/visualizer', key: 'nav.visualizer', icon: Radar, on: (p) => p === '/visualizer' },
+  { to: '/loadtest', key: 'nav.loadtest', icon: Gauge, on: (p) => p === '/loadtest' },
+];
+const OPS_PATHS = ['/visualizer', '/loadtest', '/ops'];
+const OPERATOR_PATHS = ['/ops', '/visualizer', '/loadtest'];
 
 function DemoMenu() {
   const { t } = useI18n();
@@ -55,15 +64,42 @@ function DemoMenu() {
   );
 }
 
+// Who is signed in, and the way to switch (each tab keeps its own session).
+function UserMenu() {
+  const { t } = useI18n();
+  const { session, signOut } = useSession();
+  const { navigate } = useRouter();
+  if (!session) return null;
+  const operator = session.role === 'operator';
+  return (
+    <details className="user-menu">
+      <summary title={session.display_name}>
+        <span className="avatar" aria-hidden="true">{session.display_name.slice(0, 1).toUpperCase()}</span>
+        <span className="uname">{session.display_name}</span>
+      </summary>
+      <div className="user-pop">
+        <p className="muted tiny">{t('user.signedInAs')}</p>
+        <strong>{session.display_name}</strong>
+        <p className="muted small">{operator ? t('user.role.operator') : `${t('user.role.traveller')} · ${session.home_currency}`}</p>
+        <button className="btn outline sm block" onClick={() => { signOut(); navigate('/', { replace: true }); }}>
+          <LogOut size={14} /> {t('user.switch')}
+        </button>
+      </div>
+    </details>
+  );
+}
+
 function Header() {
   const { t, lang, setLang } = useI18n();
   const { path } = useRouter();
+  const { role } = useSession();
   const { currency, setCurrency, currencies, meta } = useApp();
   const { items, reserved } = useTrip();
   const [open, setOpen] = useState(false);
   const soonest = reserved ? items.map((i) => i.expires_at).sort()[0] : null;
+  const nav = role === 'operator' ? OPERATOR_NAV : TRAVELLER_NAV;
 
-  const links = NAV.map(({ to, key, icon: Icon, on, trip }) => (
+  const links = nav.map(({ to, key, icon: Icon, on, trip }) => (
     <Link key={to} to={to} className={`nav-link ${on(path) ? 'active' : ''}`} onClick={() => setOpen(false)}>
       <Icon size={16} aria-hidden="true" />
       {t(key)}
@@ -79,28 +115,30 @@ function Header() {
   return (
     <header className="site-header">
       <div className={`site-header-inner ${OPS_PATHS.includes(path) ? 'wide' : ''}`}>
-        <Link to="/" className="brand" aria-label="Kognivera">
+        <Link to={role === 'operator' ? '/ops' : '/'} className="brand" aria-label="Kognivera">
           <span className="brand-mark" aria-hidden="true">K</span>
           <span>Kognivera</span>
         </Link>
         <nav className="site-nav" aria-label="Main">{links}</nav>
         <div className="header-tools">
-          <label className="select-pill" title={t('header.currency')}>
-            <span className="sr-only">{t('header.currency')}</span>
-            <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
-              {currencies.map((c) => (
-                <option key={c.iso4217} value={c.iso4217}>
-                  {c.iso4217} {c.symbol}
-                </option>
-              ))}
-            </select>
-          </label>
+          {role !== 'operator' && (
+            <label className="select-pill" title={t('header.currency')}>
+              <span className="sr-only">{t('header.currency')}</span>
+              <select value={currency} onChange={(e) => setCurrency(e.target.value)}>
+                {currencies.map((c) => (
+                  <option key={c.iso4217} value={c.iso4217}>
+                    {c.iso4217} {c.symbol}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <div className="lang-toggle" role="group" aria-label={t('header.language')}>
             <button className={lang === 'en' ? 'on' : ''} onClick={() => setLang('en')} aria-pressed={lang === 'en'}>EN</button>
             <button className={lang === 'hi' ? 'on' : ''} onClick={() => setLang('hi')} aria-pressed={lang === 'hi'}>हिं</button>
           </div>
-          {meta?.demo_controls && <DemoMenu />}
-          {meta && <span className="user-pill" title={meta.user.user_id}>{meta.user.display_name}</span>}
+          {role !== 'operator' && meta?.demo_controls && <DemoMenu />}
+          <UserMenu />
           <button className="menu-btn" aria-label={t('nav.menu')} aria-expanded={open} onClick={() => setOpen(!open)}>
             {open ? <X size={22} /> : <Menu size={22} />}
           </button>
@@ -123,9 +161,24 @@ function Toasts() {
 }
 
 function Routes() {
-  const { path } = useRouter();
+  const { path, navigate } = useRouter();
+  const { role } = useSession();
   const { t } = useI18n();
+  const operatorOnTravellerPage = role === 'operator' && !OPERATOR_PATHS.includes(path);
+  // The operator has no traveller identity: send them to their dashboard instead of a page that would be refused.
+  useEffect(() => {
+    if (operatorOnTravellerPage) navigate('/ops', { replace: true });
+  }, [operatorOnTravellerPage, navigate]);
+  if (operatorOnTravellerPage) return null;
+
   let m;
+  if (path === '/ops') {
+    return role === 'operator' ? <OpsPage /> : (
+      <div className="container narrow page">
+        <Empty icon={Activity} title={t('ops.operatorsOnly')}>{t('ops.operatorsOnlyBody')}</Empty>
+      </div>
+    );
+  }
   if (path === '/') return <HomePage />;
   if (path === '/search') return <SearchPage />;
   if ((m = matchPath('/hotel/:hotelId', path))) return <HotelPage hotelId={m.hotelId} />;
@@ -145,8 +198,10 @@ function Routes() {
 
 export default function App() {
   const { meta, bootError } = useApp();
+  const { session } = useSession();
   const { path } = useRouter();
   const { t } = useI18n();
+  if (!session) return <LoginPage />;
   const ops = OPS_PATHS.includes(path);
 
   return (

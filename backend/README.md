@@ -130,6 +130,10 @@ replacement (k6 fires requests; it doesn't know what "oversell" means for this s
 script wires k6's `teardown()` to hit `/api/invariants` directly, making it a genuinely self-contained check,
 not just a request-firer):
 
+Each request is sent as a different user: `setup()` fetches active ids from `GET /api/users/ids` and builds a
+`{request number: user id}` dictionary, and every request sets `X-User-Id` from it (`-e SINGLE_USER=true` restores the old
+no-header behaviour). The activity feed on the Operations dashboard then shows many distinct users.
+
 ```bash
 winget install --id GrafanaLabs.k6 -e                    # one-time
 k6 run scripts/k6-loadtest.js                             # 200 VUs at an auto-picked scarce row, localhost:3000

@@ -27,9 +27,9 @@ proven by a load test that shows zero oversell.
 |---|---|
 | `frontend/` | React 18 + Vite, Airbnb-style light UI with a dark ops theme. Routed pages: Home (Hotels/Flights + AI search), Results, Stay, Hold & pay (countdown, Card/UPI), Confirmation (retry-same-request, rollback view), My bookings (cancel dialog), **System Visualizer** (simulated or live-backend event source), Load test (live chart + verdict). English/Hindi UI, currency switcher, Demo controls that inject saga failures. |
 | `backend/src/` | Express API. `routes.js` (HTTP contract) → `validation.js` (zod, strict) → `modules/` (`booking/holds.js`, `booking/bookings.js`, `inventory/*`, `payment/mock.js`, `loadtest/engine.js`, `invariants.js`) → `db.js` (pool, deadlock-retrying `withTx`, sorted `lockInventory`). `errors.js` = bilingual error catalogue + Postgres/pool error mapping. |
-| `ai/` | Natural-language search. Gemini function-calling fills a `search_hotels` schema (`prompts/`); the result feeds the **same** grounded SQL search as the form. Heuristic + cache fallbacks. |
+| `ai/` | Natural-language search for hotels and flights. Gemini function-calling fills a `search_hotels` / `search_flights` schema (`prompts/`); the result feeds the **same** grounded SQL search as the form (`POST /api/search/ai`, `kind: "hotels" \| "flights"`). Heuristic + cache fallbacks. |
 | `data-model/` | Canonical schema, our additive migrations, seed CSVs, loaders and the conformance validator. See `DATA_MODEL.md`. |
-| `tests/` | 48 automated tests against real Postgres (concurrency races, idempotency, saga, expiry, cancel, HTTP contract, AI parsing). |
+| `tests/` | 56 automated tests against real Postgres (concurrency races, idempotency, saga, expiry, cancel, HTTP contract, AI parsing). |
 | `.github/workflows/` | Three GitHub Actions workflows that fire load from separate machines (see "Proof"). |
 
 ## How correctness is achieved
@@ -77,7 +77,7 @@ tried in turn, 6 s timeout each) → English heuristic parser. The response says
 | Genuinely separate machines | `.github/workflows/distributed-load-test.yml` · `distributed-idempotency-test.yml` |
 | Idempotency under a dropped response | `backend/scripts/simulate-network-retry.mjs` · `network-retry-test.yml` |
 | Data invariants at any moment | `GET /api/invariants` · `npm run invariants` |
-| Automated tests | `npm test` (in `backend/`) — 48 tests |
+| Automated tests | `npm test` (in `backend/`) — 56 tests |
 
 Details and measured numbers: `backend/README.md`.
 
@@ -87,6 +87,8 @@ Details and measured numbers: `backend/README.md`.
 |---|---|
 | `GET /health` · `/metrics` · `/invariants` | status · safety-net counter · the correctness proof as queries |
 | `GET /cities` · `/currencies` · `/fx` · `/meta` · `/demo-user` | reference data |
+| `GET /personas` | the 10 demo travellers for the login screen |
+| `GET /ops/summary` · `POST /ops/reset-demo` | operator only: holds, bookings, inventory, invariants, activity feed; undo the demo's own holds/bookings |
 | `GET /search/hotels` · `/search/flights` · `POST /search/ai` | availability search (form, and natural language) |
 | `GET /inventory/:id` · `/inventory/contended` | one row's counters · the scarce rows worth racing |
 | `POST /holds` · `GET /holds/:id` · `POST /holds/:id/release` | TTL hold (`Idempotency-Key` required) |
@@ -105,3 +107,7 @@ Request/response shapes and status codes: `backend/README.md` (API section).
 - One Node process is the request front door on a dev laptop; a burst of hundreds of simultaneous *new* TCP
   connections can be refused by the OS before the app sees them. That is a transport ceiling, not an oversell.
 - The Gemini API is a network dependency; the cache and heuristic parser keep the demo working when it is down.
+
+## Mock login and sessions
+
+The browser sends `X-User-Id` (a seeded active user id, or `operator`); the server checks it against the users table and it wins over any `user_id` in a request body, so one traveller cannot read or cancel another's holds and bookings. A missing header falls back to the demo user, which keeps k6, CI and the load test working unchanged. The operator has no traveller identity (traveller endpoints return 403) and the ops endpoints require it (401/403). **This is demo identity, not authentication:** no passwords, no tokens. Rejected (sold-out) attempts leave no row, so the activity feed keeps them in an in-memory buffer that resets on server restart.

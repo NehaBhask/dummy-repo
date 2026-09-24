@@ -28,7 +28,7 @@ function TypeSwitch({ type, setQuery }) {
   return (
     <Segmented
       value={type}
-      onChange={(v) => setQuery({ type: v === 'flights' ? 'flights' : '' }, { replace: false, scroll: false })}
+      onChange={(v) => setQuery({ type: v === 'flights' ? 'flights' : '', q: '' }, { replace: false, scroll: false })}
       label={t('home.tabs')}
       options={[{ value: 'hotels', label: t('home.hotels') }, { value: 'flights', label: t('home.flights') }]}
     />
@@ -336,23 +336,79 @@ const pickDate = (dates, want, today) => {
   return dates.find((d) => d >= today) ?? dates[0];
 };
 
+// What the AI understood for a flight query, and — instead of an empty page — what it needs or what exists.
+function FlightAiSummary({ ai, onPick }) {
+  const { t, date } = useI18n();
+  const sp = ai.search_params ?? {};
+  const chips = [
+    sp.origin && sp.destination ? `✈ ${sp.origin} → ${sp.destination}` : sp.destination && `✈ → ${sp.destination}`,
+    ai.needs_clarification ? null : sp.date && `📅 ${date(sp.date)}`,
+    sp.seats && `👤 ${sp.seats}`,
+  ].filter(Boolean);
+
+  return (
+    <div className="ai-card">
+      <div className="ai-head">
+        <span className="badge accent">{t('search.aiUnderstood')}</span>
+        <span className={`badge ${ai.parser === 'gemini' ? 'good' : ai.parser === 'cache' ? 'info' : 'warn'}`}>
+          {ai.parser === 'gemini' ? t('search.parserGemini') : ai.parser === 'cache' ? t('search.parserCache') : t('search.parserFallback')}
+        </span>
+      </div>
+      {ai.parser === 'heuristic' && <p className="small muted">{t('home.aiFallbackNote')}</p>}
+      {chips.length > 0 && <div className="chips">{chips.map((c) => <span key={c} className="chip neutral">{c}</span>)}</div>}
+      {ai.needs_clarification === 'destination' && <p>{t('search.needDestination')}</p>}
+      {ai.needs_clarification === 'origin' && (
+        <>
+          <p>{t('search.needOrigin', { city: sp.destination })}</p>
+          <div className="chips">{(ai.origins ?? []).map((o) => <button key={o} className="chip-btn" onClick={() => onPick({ origin: o })}>{o}</button>)}</div>
+        </>
+      )}
+      {ai.no_results_reason === 'no_route' && <div className="banner warn"><p>{t('search.noRouteAi', { from: sp.origin, to: sp.destination })}</p></div>}
+      {ai.no_results_reason === 'no_flights_on_date' && (
+        <div className="banner warn">
+          <p>{t('search.noFlightsOnDate')}</p>
+          <div className="chips">{ai.available_dates.map((d) => <button key={d} className="chip-btn" onClick={() => onPick({ date: d })}>{date(d)}</button>)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FlightResults({ params, setQuery }) {
   const { t, date, time } = useI18n();
   const { meta, currency, toast } = useApp();
   const { navigate } = useRouter();
   const trip = useTrip();
   const { bookable } = useCities();
+  const q = params.q;
 
-  const destination = params.destination ?? 'Jaipur';
-  const seats = Math.max(1, Number(params.seats) || 1);
+  // AI mode: the results (and the route they imply) come from the AI search; otherwise from the form's URL params.
+  const [aiState, setAiState] = useState({ status: 'idle', data: null, error: null });
+  useEffect(() => {
+    if (!q) return undefined;
+    let live = true;
+    setAiState({ status: 'loading', data: null, error: null });
+    api.aiSearch(q, currency, 'flights')
+      .then((data) => live && setAiState({ status: 'done', data, error: null }))
+      .catch((error) => live && setAiState({ status: 'error', data: null, error }));
+    return () => { live = false; };
+  }, [q, currency]);
+  const ai = q ? aiState.data : null;
+  const sp = ai?.search_params ?? {};
+
+  const destination = q ? (sp.destination ?? params.destination ?? 'Jaipur') : (params.destination ?? 'Jaipur');
+  const seats = q ? (sp.seats ?? 1) : Math.max(1, Number(params.seats) || 1);
   const routes = useFlightRoutes(destination);
-  const origin = params.origin && routes?.some((r) => r.origin === params.origin) ? params.origin : (routes?.[0]?.origin ?? '');
+  const origin = q ? (sp.origin ?? '') : (params.origin && routes?.some((r) => r.origin === params.origin) ? params.origin : (routes?.[0]?.origin ?? ''));
   const route = routes?.find((r) => r.origin === origin);
-  const day = pickDate(route?.dates, params.date, meta.today);
+  const day = q ? (ai?.needs_clarification ? '' : (sp.date ?? '')) : pickDate(route?.dates, params.date, meta.today);
+
+  // Editing any field turns an AI search into a normal one that starts from what the AI understood.
+  const update = (patch) => setQuery(q ? { q: '', type: 'flights', destination, origin, date: day, seats, ...patch } : patch);
 
   const [state, setState] = useState({ status: 'idle', data: null, error: null });
-
   useEffect(() => {
+    if (q) return undefined;
     if (!origin || !day) {
       setState({ status: routes ? 'done' : 'loading', data: null, error: null });
       return undefined;
@@ -363,7 +419,7 @@ function FlightResults({ params, setQuery }) {
       .then((data) => live && setState({ status: 'done', data, error: null }))
       .catch((error) => live && setState({ status: 'error', data: null, error }));
     return () => { live = false; };
-  }, [origin, destination, day, seats, currency, routes]);
+  }, [q, origin, destination, day, seats, currency, routes]);
 
   // Nothing is held here: the seat joins the trip, and one Reserve on the trip page holds everything together.
   function addToTrip(r) {
@@ -374,7 +430,7 @@ function FlightResults({ params, setQuery }) {
       const released = trip.addItem({
         kind: 'flight',
         title: `${r.flight.airline} ${r.flight.flight_number} · ${r.flight.origin.city} → ${r.flight.destination.city}`,
-        subtitle: `${date(day)} · ${t(`cabin.${r.fare.cabin_class}`)} · ${r.stay.units} ${t('trip.seats')}`,
+        subtitle: `${date(r.stay.for_date)} · ${t(`cabin.${r.fare.cabin_class}`)} · ${r.stay.units} ${t('trip.seats')}`,
         units: r.stay.units,
         city: r.flight.destination.city,
         stay: r.stay,
@@ -386,9 +442,10 @@ function FlightResults({ params, setQuery }) {
     navigate('/hold');
   }
 
-  const { status, data, error } = state;
+  const status = q ? aiState.status : state.status;
+  const error = q ? aiState.error : state.error;
+  const results = q ? (ai?.results ?? []) : (state.data?.results ?? []);
   const cities = bookable.length ? bookable : [{ name: destination }];
-  const results = data?.results ?? [];
 
   return (
     <>
@@ -401,35 +458,39 @@ function FlightResults({ params, setQuery }) {
         <TypeSwitch type="flights" setQuery={setQuery} />
       </div>
 
+      {q && ai && <FlightAiSummary ai={ai} onPick={update} />}
+
       <div className="flight-filters">
         <label>
           <span className="field-label">{t('trip.flyTo')}</span>
-          <select className="input" value={destination} onChange={(e) => setQuery({ destination: e.target.value, origin: '', date: '' })}>
+          <select className="input" value={destination} onChange={(e) => update({ destination: e.target.value, origin: '', date: '' })}>
             {cities.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
           </select>
         </label>
         <label>
           <span className="field-label">{t('trip.flyFrom')}</span>
-          <select className="input" value={origin} disabled={!routes?.length} onChange={(e) => setQuery({ origin: e.target.value, date: '' })}>
+          <select className="input" value={origin} disabled={!routes?.length} onChange={(e) => update({ origin: e.target.value, date: '' })}>
+            {!origin && <option value="">—</option>}
             {(routes ?? []).map((r) => <option key={r.origin} value={r.origin}>{r.origin}</option>)}
           </select>
         </label>
         <label>
           <span className="field-label">{t('trip.flyDate')}</span>
-          <select className="input" value={day} disabled={!route} onChange={(e) => setQuery({ date: e.target.value })}>
+          <select className="input" value={day} disabled={!route} onChange={(e) => update({ date: e.target.value })}>
+            {!day && <option value="">—</option>}
             {(route?.dates ?? []).map((d) => <option key={d} value={d}>{date(d)}</option>)}
           </select>
         </label>
         <label>
           <span className="field-label">{t('trip.seatsLabel')}</span>
-          <input className="input" type="number" min="1" max="6" value={seats} onChange={(e) => setQuery({ seats: e.target.value })} />
+          <input className="input" type="number" min="1" max="6" value={seats} onChange={(e) => update({ seats: e.target.value })} />
         </label>
       </div>
 
       <ErrorBanner error={error} />
-      {routes?.length === 0 && <Empty icon={Plane} title={t('trip.noRoutes', { city: destination })} />}
-      {status === 'loading' && !data && <Skeleton h={130} />}
-      {data && results.length === 0 && routes?.length > 0 && <Empty icon={Plane} title={t('trip.noFlights')} />}
+      {!q && routes?.length === 0 && <Empty icon={Plane} title={t('trip.noRoutes', { city: destination })} />}
+      {status === 'loading' && results.length === 0 && <Skeleton h={130} />}
+      {!q && state.data && results.length === 0 && routes?.length > 0 && <Empty icon={Plane} title={t('trip.noFlights')} />}
 
       <section className="results-list flights">
         {results.map((r) => (

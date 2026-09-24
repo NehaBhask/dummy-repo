@@ -56,6 +56,12 @@ export function buildRouter({ worker } = {}) {
   /* ------------------------ mock login & operations ------------------------ */
   // The 10 demo travellers for the login dropdown (public: it is the way in).
   r.get('/personas', async (_req, res) => res.json({ personas: await listPersonas(), operator: { user_id: 'operator', display_name: 'Operations' } }));
+  // Active user ids for load tests: each simulated request sends a different X-User-Id (ids only, no personal data).
+  r.get('/users/ids', async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 1000, 1), 5000);
+    const { rows } = await pool.query(`SELECT user_id FROM users WHERE status = 'active' ORDER BY user_id LIMIT $1`, [limit]);
+    res.json({ user_ids: rows.map((u) => u.user_id) });
+  });
   r.get('/ops/summary', operatorOnly, async (req, res) => res.json(await opsSummary({ inventoryId: req.query.inventory_id ?? null })));
   r.post('/ops/reset-demo', operatorOnly, async (_req, res) => res.json(await resetDemo()));
 

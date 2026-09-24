@@ -5,7 +5,7 @@ import { useApp } from '../context.jsx';
 import { useI18n } from '../i18n.jsx';
 import { Link, qs, useQuery, useRouter } from '../router.jsx';
 import { useTrip } from '../trip.jsx';
-import { breakdown, TAX_PCT } from '../lib/money.js';
+import { breakdown, fromCents, TAX_PCT, toCents } from '../lib/money.js';
 import { Empty, ErrorBanner, Skeleton } from '../components/ui.jsx';
 
 const PTYPE_ICON = { hotel: Hotel, resort: Palmtree, homestay: Home, hostel: Building, apartment: Building, boutique: Store, heritage: Castle, guesthouse: Home };
@@ -25,6 +25,9 @@ export default function HotelPage({ hotelId }) {
     adults: Number(params.adults) || 2,
   };
   const backTo = `/search?${qs(search)}`;
+  // Availability is always searched for 1 room, so every room type stays visible with its real free count;
+  // the number of rooms to book is chosen here (capped at what is free) and prices are scaled from the 1-room price.
+  const [wanted, setWanted] = useState(Math.min(5, Math.max(1, search.rooms)));
 
   const [state, setState] = useState({ status: 'loading', card: null, error: null });
   const [sel, setSel] = useState({ room: 0, opt: 0 });
@@ -34,7 +37,7 @@ export default function HotelPage({ hotelId }) {
     let live = true;
     setState((s) => ({ ...s, status: 'loading', error: null }));
     // There is no single-hotel endpoint: re-run the same availability search and pick this hotel out of it.
-    api.searchHotels({ ...search, currency, limit: 50 })
+    api.searchHotels({ ...search, rooms: 1, include_sold_out: 1, currency, limit: 50 })
       .then((r) => {
         if (!live) return;
         const card = r.results.find((c) => c.hotel.hotel_id === hotelId) ?? null;
@@ -44,11 +47,23 @@ export default function HotelPage({ hotelId }) {
       .catch((error) => live && setState({ status: 'error', card: null, error }));
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hotelId, search.city, search.check_in, search.nights, search.rooms, search.adults, currency, nonce]);
+  }, [hotelId, search.city, search.check_in, search.nights, search.adults, currency, nonce]);
 
   const { card, status, error } = state;
   const room = card?.rooms[sel.room];
-  const opt = room?.options[Math.min(sel.opt, (room?.options.length ?? 1) - 1)];
+  const maxRooms = Math.max(1, Math.min(5, room?.available_units ?? 1));
+  const rooms = Math.min(wanted, maxRooms);
+  const scaled = (m) => {
+    if (!m || rooms === 1) return m;
+    const amount = fromCents(toCents(m.amount) * BigInt(rooms));
+    return { ...m, amount, display: money(amount, m.currency) };
+  };
+  const base = room?.options[Math.min(sel.opt, (room?.options.length ?? 1) - 1)];
+  const opt = useMemo(
+    () => (base ? { ...base, per_night: scaled(base.per_night), total: scaled(base.total) } : base),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [base, rooms],
+  );
   const price = useMemo(() => (opt ? breakdown([{ amount: opt.total.amount, currency: opt.total.currency }]) : null), [opt]);
 
   // Nothing is held here: the item joins the trip, and one Reserve on the trip page holds everything together.
@@ -63,8 +78,8 @@ export default function HotelPage({ hotelId }) {
         city: card.hotel.city,
         checkIn: room.stay.for_date,
         nights: room.stay.nights,
-        units: room.stay.units,
-        stay: room.stay,
+        units: rooms,
+        stay: { ...room.stay, units: rooms },
         inventoryIds: room.inventory.map((i) => i.inventory_id),
         ratePlanId: opt.rate_plan?.rate_plan_id ?? null,
         ratePlanName: opt.rate_plan?.name ?? null,
@@ -145,8 +160,8 @@ export default function HotelPage({ hotelId }) {
                         {t(`bed.${r.bed_config}`)} · {t('search.sleeps', { n: r.max_occupancy })}{r.size_sqm ? ` · ${r.size_sqm} m²` : ''}
                       </span>
                     </span>
-                    <span className={`badge ${r.available_units <= 2 ? 'warn' : 'good'}`}>
-                      {r.available_units <= 2 ? t('search.onlyLeft', { n: r.available_units }) : t('search.available', { n: r.available_units })}
+                    <span className={`badge ${soldOut ? 'bad' : r.available_units <= 2 ? 'warn' : 'good'}`}>
+                      {soldOut ? t('hotel.booked') : r.available_units <= 2 ? t('search.onlyLeft', { n: r.available_units }) : t('search.available', { n: r.available_units })}
                     </span>
                   </button>
                   {sel.room === ri && (
@@ -182,6 +197,14 @@ export default function HotelPage({ hotelId }) {
               {price && <p><span>{t('hotel.taxes', { pct: TAX_PCT })}</span><span>{money(price.tax, price.currency)}</span></p>}
               {price && <p className="total"><span>{t('hotel.total')}</span><span>{money(price.total, price.currency)}</span></p>}
             </div>
+            <label className="rooms-field">
+              <span>{t('search.rooms')}</span>
+              <span className="stepper">
+                <button type="button" aria-label="−" disabled={rooms <= 1} onClick={() => setWanted(rooms - 1)}>−</button>
+                <output aria-live="polite">{rooms}</output>
+                <button type="button" aria-label="+" disabled={rooms >= maxRooms} onClick={() => setWanted(rooms + 1)}>+</button>
+              </span>
+            </label>
             {scarce && <p className="low-stock">{t('hotel.lowStock', { n: room.available_units })}</p>}
             <button className="btn primary lg block" disabled={room.available_units <= 0} onClick={addToTrip}>
               {t('trip.addToTrip')}

@@ -14,7 +14,8 @@ import { api } from './api.js';
  * Persisted to localStorage so a refresh doesn't lose a running countdown; the server stays the source
  * of truth for whether a hold is still active (polled below).
  */
-const KEY = 'kognivera.trip.v4';
+// One stored trip per demo user, so switching user never shows someone else's cart or reservation.
+const storageKey = (userId) => `kognivera.trip.v4:${userId ?? 'anon'}`;
 const EMPTY = {
   items: [], // {id, kind:'hotel'|'flight', title, stay, inventoryIds, total, holds:[{hold_id,inventory_id}], expires_at, status}
   settings: { ttl: 0, simulate: '', method: 'card' }, // demo controls; ttl 0 = server default
@@ -22,9 +23,9 @@ const EMPTY = {
   lastRequest: null, // exact {key, body} of the last confirm, so it can be retried verbatim (idempotency demo)
 };
 
-const load = () => {
+const load = (key) => {
   try {
-    const raw = JSON.parse(localStorage.getItem(KEY));
+    const raw = JSON.parse(localStorage.getItem(key));
     // Demo overrides (short hold time, simulated failure) are deliberately NOT restored: a leftover
     // "flight fails" must never silently break a later checkout. Payment method is a real preference.
     return raw ? { ...EMPTY, ...raw, settings: { ...EMPTY.settings, method: ['card', 'upi'].includes(raw.settings?.method) ? raw.settings.method : 'card' } } : EMPTY;
@@ -36,18 +37,19 @@ const load = () => {
 const DRAFT = { holds: [], expires_at: null, status: 'draft', soldOut: false };
 const TripCtx = createContext(null);
 
-export function TripProvider({ children }) {
-  const [state, setState] = useState(load);
+export function TripProvider({ userId, children }) {
+  const key = storageKey(userId);
+  const [state, setState] = useState(() => load(key));
   const stateRef = useRef(state);
   stateRef.current = state;
 
   useEffect(() => {
     try {
-      localStorage.setItem(KEY, JSON.stringify(state));
+      localStorage.setItem(key, JSON.stringify(state));
     } catch {
       /* ignore */
     }
-  }, [state]);
+  }, [state, key]);
 
   const patchItem = useCallback((id, patch) => {
     setState((s) => ({ ...s, items: s.items.map((i) => (i.id === id ? { ...i, ...patch } : i)) }));

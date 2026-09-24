@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Bed, Bot, Building2, CalendarDays, Castle, Hotel, Landmark, MapPin, Mountain, Palmtree, Plane, Search, Star, Users, Waves } from 'lucide-react';
+import { Bed, Building2, CalendarDays, Castle, DoorOpen, Hotel, Landmark, MapPin, Mountain, Palmtree, Plane, PlaneTakeoff, Search, Sparkles, Star, Users, Waves } from 'lucide-react';
 import { api } from '../api.js';
 import { useApp } from '../context.jsx';
 import { useI18n } from '../i18n.jsx';
@@ -7,7 +7,6 @@ import { useCities, useFlightRoutes } from '../hooks.js';
 import { qs, useRouter } from '../router.jsx';
 import { Segmented } from '../components/ui.jsx';
 
-const EXAMPLES = ['search.example1', 'search.example2', 'search.example3'];
 const CITY_ICON = {
   Jaipur: Castle, Jaisalmer: Castle, Udaipur: Landmark, Agra: Landmark, Varanasi: Waves, Panaji: Palmtree, Alleppey: Palmtree,
   Kochi: Palmtree, Manali: Mountain, Shimla: Mountain, Mumbai: Building2, 'New Delhi': Building2, Kolkata: Building2, Bengaluru: Building2,
@@ -20,6 +19,7 @@ export default function HomePage() {
   const { bookable } = useCities();
 
   const [tab, setTab] = useState('hotels');
+  const [ai, setAi] = useState(false); // "Ask AI": swaps the manual bar for a natural-language one (hotels only)
   const [hotel, setHotel] = useState({ city: 'Jaipur', check_in: meta.default_check_in, nights: 2, rooms: 1, adults: 2 });
   const [flight, setFlight] = useState({ destination: 'Jaipur', origin: '', date: '', seats: 1 });
   const [query, setQuery] = useState('');
@@ -28,28 +28,56 @@ export default function HomePage() {
 
   const routes = useFlightRoutes(tab === 'flights' ? flight.destination : null);
   const route = routes?.find((r) => r.origin === flight.origin);
+  // Keep the current date if the route flies that day, otherwise the first upcoming departure.
+  const pickDate = (r, current) => (r.dates.includes(current) ? current : (r.dates.find((d) => d >= meta.today) ?? r.dates[0]));
   useEffect(() => {
     if (!routes?.length) return;
     setFlight((f) => {
       const r = routes.find((x) => x.origin === f.origin) ?? routes[0];
-      const date = r.dates.includes(f.date) ? f.date : (r.dates.find((d) => d >= meta.today) ?? r.dates[0]);
-      return { ...f, origin: r.origin, date };
+      return { ...f, origin: r.origin, date: pickDate(r, f.date) };
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routes, meta.today]);
+  // Changing the origin must re-pick a date too, or the empty date locks the search button.
+  const changeOrigin = (origin) => {
+    const r = routes?.find((x) => x.origin === origin);
+    setFlight((f) => ({ ...f, origin, date: r ? pickDate(r, f.date) : '' }));
+  };
+
+  // Flights: is there actually something to book on this route, date and party size?
+  // 'idle' | 'checking' | 'ok' | 'none'. The search button stays disabled and says so when there is not.
+  const [avail, setAvail] = useState('idle');
+  useEffect(() => {
+    if (tab !== 'flights') return undefined;
+    if (routes && !routes.length) { setAvail('none'); return undefined; }
+    if (!flight.origin || !flight.date) { setAvail('idle'); return undefined; }
+    let live = true;
+    setAvail('checking');
+    api.searchFlights({ origin: flight.origin, destination: flight.destination, date: flight.date, seats: flight.seats, currency })
+      .then((r) => live && setAvail(r.results.length ? 'ok' : 'none'))
+      .catch(() => live && setAvail('ok')); // a failed check must not block the search; the results page reports errors
+    return () => { live = false; };
+  }, [tab, routes, flight.origin, flight.destination, flight.date, flight.seats, currency]);
 
   const setH = (k) => (e) => setHotel((h) => ({ ...h, [k]: e.target.value }));
   const setF = (k) => (e) => setFlight((f) => ({ ...f, [k]: e.target.value }));
+  const noFlights = tab === 'flights' && avail === 'none';
+  const noFlightsMsg = routes && !routes.length
+    ? t('trip.noRoutes', { city: flight.destination })
+    : t('home.noFlightsRoute', { from: flight.origin, to: flight.destination });
 
   function submit(e) {
     e.preventDefault();
     if (tab === 'hotels') navigate(`/search?${qs(hotel)}`);
-    else navigate(`/search?${qs({ type: 'flights', ...flight })}`);
+    else if (!noFlights) navigate(`/search?${qs({ type: 'flights', ...flight })}`);
   }
-  function askAI(text) {
-    const q = text.trim();
+  function askAI(e) {
+    e.preventDefault();
+    const q = query.trim();
     if (q.length < 3) return setHint(true);
-    navigate(`/search?${qs({ q })}`);
+    navigate(`/search?${qs({ q, type: tab === 'flights' ? 'flights' : '' })}`);
   }
+  const switchTab = (v) => { setTab(v); setHint(false); };
 
   const cityOptions = bookable.length ? bookable : [{ name: hotel.city }];
 
@@ -64,112 +92,138 @@ export default function HomePage() {
           <div className="hero-tabs">
             <Segmented
               value={tab}
-              onChange={setTab}
+              onChange={switchTab}
               label={t('home.tabs')}
               options={[{ value: 'hotels', label: t('home.hotels'), icon: Hotel }, { value: 'flights', label: t('home.flights'), icon: Plane }]}
             />
           </div>
 
-          <form className="search-panel" onSubmit={submit}>
-            {tab === 'hotels' ? (
-              <>
-                <label className="search-cell wide">
-                  <MapPin size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('home.where')}</span>
-                    <select value={hotel.city} onChange={setH('city')}>
-                      {cityOptions.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-                    </select>
-                  </span>
-                </label>
-                <label className="search-cell">
-                  <CalendarDays size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('search.checkIn')}</span>
-                    <input type="date" value={hotel.check_in} min={win.from} max={win.to} onChange={setH('check_in')} required />
-                  </span>
-                </label>
-                <label className="search-cell narrow">
-                  <Bed size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('search.nights')}</span>
-                    <input type="number" min="1" max="14" value={hotel.nights} onChange={setH('nights')} />
-                  </span>
-                </label>
-                <label className="search-cell narrow">
-                  <Users size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('search.adults')}</span>
-                    <input type="number" min="1" max="10" value={hotel.adults} onChange={setH('adults')} />
-                  </span>
-                </label>
-              </>
-            ) : (
-              <>
-                <label className="search-cell">
-                  <MapPin size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('trip.flyTo')}</span>
-                    <select value={flight.destination} onChange={(e) => setFlight({ destination: e.target.value, origin: '', date: '', seats: flight.seats })}>
-                      {cityOptions.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-                    </select>
-                  </span>
-                </label>
-                <label className="search-cell">
-                  <Plane size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('trip.flyFrom')}</span>
-                    <select value={flight.origin} onChange={(e) => setFlight((f) => ({ ...f, origin: e.target.value, date: '' }))} disabled={!routes?.length}>
-                      {(routes ?? []).map((r) => <option key={r.origin} value={r.origin}>{r.origin}</option>)}
-                    </select>
-                  </span>
-                </label>
-                <label className="search-cell">
-                  <CalendarDays size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('trip.flyDate')}</span>
-                    <FlightDate route={route} value={flight.date} onChange={setF('date')} />
-                  </span>
-                </label>
-                <label className="search-cell narrow">
-                  <Users size={20} aria-hidden="true" />
-                  <span>
-                    <span className="cell-label">{t('trip.seatsLabel')}</span>
-                    <input type="number" min="1" max="6" value={flight.seats} onChange={setF('seats')} />
-                  </span>
-                </label>
-              </>
-            )}
-            <button className="search-go" type="submit" aria-label={t('search.button')} disabled={tab === 'flights' && !flight.date}>
-              <Search size={24} />
-            </button>
-          </form>
-          {tab === 'flights' && routes?.length === 0 && <p className="hint center">{t('trip.noRoutes', { city: flight.destination })}</p>}
-          <p className="hint center">{t('search.window', { from: win.from, to: win.to })}</p>
-
-          <div className="ai-panel">
-            <form className="ai-row" onSubmit={(e) => { e.preventDefault(); askAI(query); }}>
-              <Bot size={20} className="ai-icon" aria-hidden="true" />
-              <input
-                value={query}
-                onChange={(e) => { setQuery(e.target.value); setHint(false); }}
-                placeholder={t('home.aiPlaceholder')}
-                aria-label={t('search.aiLabel')}
-              />
-              <span className="ai-chip">{t('home.poweredByAi')}</span>
-              <button className="btn primary" type="submit">
-                {t('home.searchNaturally')} <ArrowRight size={16} />
-              </button>
-            </form>
-            {hint && <p className="ai-hint">{t('home.aiHint')}</p>}
-            {!meta.ai_search.enabled && <p className="ai-hint">{t('search.aiOffline')}</p>}
-          </div>
-          <div className="examples">
-            <span className="muted">{t('search.try')}</span>
-            {EXAMPLES.map((k) => (
-              <button key={k} type="button" className="chip-btn" onClick={() => { setQuery(t(k)); askAI(t(k)); }}>{t(k)}</button>
-            ))}
-          </div>
+          {ai ? (
+            <>
+              <form className="search-panel ai-mode" onSubmit={askAI}>
+                <div className="ai-field">
+                  <Sparkles size={20} className="ai-icon" aria-hidden="true" />
+                  <input
+                    autoFocus
+                    value={query}
+                    onChange={(e) => { setQuery(e.target.value); setHint(false); }}
+                    placeholder={t(tab === 'flights' ? 'home.aiPlaceholderFlights' : 'home.aiPlaceholder')}
+                    aria-label={t('search.aiLabel')}
+                  />
+                  <button type="button" className="ai-toggle on" onClick={() => setAi(false)} aria-pressed="true">
+                    <Sparkles size={14} aria-hidden="true" />{t('home.manualToggle')}
+                  </button>
+                </div>
+                <button className="search-go" type="submit" aria-label={t('search.aiButton')}>
+                  <Search size={24} />
+                </button>
+              </form>
+              {hint && <p className="hint center">{t(tab === 'flights' ? 'home.aiHintFlights' : 'home.aiHint')}</p>}
+              {!meta.ai_search.enabled && <p className="hint center">{t('search.aiOffline')}</p>}
+            </>
+          ) : (
+            <>
+              <form className={`search-panel ${tab === 'hotels' ? 'hotel-mode' : ''}`} onSubmit={submit}>
+                {tab === 'hotels' ? (
+                  <>
+                    <div className="cell-wrap wide">
+                      <label className="search-cell">
+                        <MapPin size={20} aria-hidden="true" />
+                        <span>
+                          <span className="cell-label">{t('home.where')}</span>
+                          <select value={hotel.city} onChange={setH('city')}>
+                            {cityOptions.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+                          </select>
+                        </span>
+                      </label>
+                      <button type="button" className="ai-toggle" onClick={() => setAi(true)} aria-pressed="false" title={t('home.aiToggleHint')}>
+                        <Sparkles size={14} aria-hidden="true" />{t('home.aiToggle')}
+                      </button>
+                    </div>
+                    <label className="search-cell">
+                      <CalendarDays size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('search.checkIn')}</span>
+                        <input type="date" value={hotel.check_in} min={win.from} max={win.to} onChange={setH('check_in')} required />
+                      </span>
+                    </label>
+                    <label className="search-cell narrow">
+                      <Bed size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('search.nights')}</span>
+                        <input type="number" min="1" max="14" value={hotel.nights} onChange={setH('nights')} />
+                      </span>
+                    </label>
+                    <label className="search-cell narrow">
+                      <DoorOpen size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('search.rooms')}</span>
+                        <input type="number" min="1" max="5" value={hotel.rooms} onChange={setH('rooms')} />
+                      </span>
+                    </label>
+                    <label className="search-cell narrow solo">
+                      <Users size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('search.adults')}</span>
+                        <input type="number" min="1" max="10" value={hotel.adults} onChange={setH('adults')} />
+                      </span>
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <div className="cell-wrap">
+                      <label className="search-cell">
+                        <MapPin size={20} aria-hidden="true" />
+                        <span>
+                          <span className="cell-label">{t('trip.flyTo')}</span>
+                          <select value={flight.destination} onChange={(e) => setFlight({ destination: e.target.value, origin: '', date: '', seats: flight.seats })}>
+                            {cityOptions.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+                          </select>
+                        </span>
+                      </label>
+                      <button type="button" className="ai-toggle" onClick={() => setAi(true)} aria-pressed="false" title={t('home.aiToggleHint')}>
+                        <Sparkles size={14} aria-hidden="true" />{t('home.aiToggle')}
+                      </button>
+                    </div>
+                    <label className="search-cell">
+                      <Plane size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('trip.flyFrom')}</span>
+                        <select value={flight.origin} onChange={(e) => changeOrigin(e.target.value)} disabled={!routes?.length}>
+                          {(routes ?? []).map((r) => <option key={r.origin} value={r.origin}>{r.origin}</option>)}
+                        </select>
+                      </span>
+                    </label>
+                    <label className="search-cell">
+                      <CalendarDays size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('trip.flyDate')}</span>
+                        <FlightDate route={route} value={flight.date} onChange={setF('date')} />
+                      </span>
+                    </label>
+                    <label className="search-cell narrow">
+                      <Users size={20} aria-hidden="true" />
+                      <span>
+                        <span className="cell-label">{t('trip.seatsLabel')}</span>
+                        <input type="number" min="1" max="6" value={flight.seats} onChange={setF('seats')} />
+                      </span>
+                    </label>
+                  </>
+                )}
+                <button
+                  className={`search-go ${noFlights ? 'none' : ''}`}
+                  type="submit"
+                  aria-label={noFlights ? noFlightsMsg : t('search.button')}
+                  title={noFlights ? noFlightsMsg : undefined}
+                  disabled={tab === 'flights' && (noFlights || avail === 'checking' || !flight.date)}
+                >
+                  {noFlights ? <PlaneTakeoff size={24} /> : <Search size={24} />}
+                </button>
+              </form>
+              {noFlights && <p className="no-flights" role="alert">{noFlightsMsg}</p>}
+              {tab === 'flights' && avail === 'checking' && <p className="hint center">{t('home.checkingFlights')}</p>}
+            </>
+          )}
         </div>
       </section>
 

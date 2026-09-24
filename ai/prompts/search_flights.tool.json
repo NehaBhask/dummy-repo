@@ -1,0 +1,14 @@
+{
+  "name": "search_flights",
+  "description": "Search bookable flights. Fill only what the traveller stated or clearly implied.",
+  "parameters": {
+    "type": "OBJECT",
+    "properties": {
+      "origin": { "type": "STRING", "description": "Departure city in English, exactly as in the allowed list." },
+      "destination": { "type": "STRING", "description": "Arrival city in English, exactly as in the allowed list." },
+      "date": { "type": "STRING", "description": "YYYY-MM-DD departure date." },
+      "seats": { "type": "INTEGER", "description": "Number of passengers / seats." }
+    },
+    "required": ["destination"]
+  }
+}

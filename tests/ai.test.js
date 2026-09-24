@@ -2,7 +2,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../backend/src/config.js';
 import { pool, closePool } from '../backend/src/db.js';
-import { parseHeuristic, aiSearch } from '../ai/search.js';
+import { parseHeuristic, parseFlightHeuristic, aiSearch, aiFlightSearch } from '../ai/search.js';
+import { flightRoutes } from '../backend/src/modules/inventory/search.js';
 
 after(closePool);
 
@@ -70,4 +71,32 @@ test('aiSearch: a city with hotels but no inventory (Goa → Panaji) explains it
   assert.equal(r.no_results_reason, 'city_has_no_inventory');
   assert.ok(r.cities_with_inventory.includes('Jaipur'));
   await pool.query(`DELETE FROM search_logs WHERE raw_query = 'family room in Goa, 3 nights, 2 rooms'`);
+});
+
+test('flight heuristic parser: from/to roles, aliases, seats and dates', () => {
+  const p = parseFlightHeuristic('flight from Bengaluru to Jaipur on Nov 4 for 2 seats', today, [...names, 'Jaipur']);
+  assert.deepEqual([p.origin, p.destination, p.date, p.seats], ['Bengaluru', 'Jaipur', '2026-11-04', 2]);
+  const q = parseFlightHeuristic('Bangalore to New Delhi tomorrow', today, names);
+  assert.deepEqual([q.origin, q.destination, q.date], ['Bengaluru', 'New Delhi', '2026-09-22'], 'alias resolved, New Delhi not split into Delhi, relative date');
+  assert.equal(parseFlightHeuristic('flights to Agra', today, names).destination, 'Agra');
+  assert.equal(parseFlightHeuristic('flights to Agra', today, names).origin, undefined, 'a missing origin is not invented');
+});
+
+test('aiFlightSearch: real route returns grounded flights; a missing origin asks instead of guessing', async (t) => {
+  if (config.gemini.apiKey) return t.skip('a live Gemini key is configured; this test targets the offline path');
+  const [route] = await flightRoutes();
+  const date = route.dates[0];
+  const res = await aiFlightSearch({ query: `flight from ${route.origin} to ${route.destination} on ${date} for 1 seat` });
+  assert.equal(res.parser, 'heuristic');
+  assert.deepEqual([res.search_params.origin, res.search_params.destination, res.search_params.date], [route.origin, route.destination, date]);
+  assert.ok(res.total > 0);
+  for (const r of res.results) {
+    assert.equal(r.flight.origin.city, route.origin);
+    assert.equal(r.flight.destination.city, route.destination);
+    assert.ok(r.available_seats >= 1);
+  }
+  const ask = await aiFlightSearch({ query: `flights to ${route.destination}` });
+  assert.equal(ask.needs_clarification, 'origin');
+  assert.ok(ask.origins.includes(route.origin));
+  await pool.query(`DELETE FROM search_logs WHERE raw_query LIKE 'flight from %' OR raw_query LIKE 'flights to %'`);
 });

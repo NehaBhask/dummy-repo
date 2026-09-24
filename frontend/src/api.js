@@ -5,6 +5,12 @@ export const setApiLang = (l) => {
   currentLang = l;
 };
 
+// The signed-in demo user (see session.jsx), sent as X-User-Id on every request.
+let currentUser = null;
+export const setApiUser = (id) => {
+  currentUser = id;
+};
+
 export class ApiError extends Error {
   constructor(status, body) {
     const e = body?.error;
@@ -27,7 +33,7 @@ async function request(method, path, { body, headers, query } = {}) {
   try {
     res = await fetch(path + qs, {
       method,
-      headers: { 'content-type': 'application/json', 'accept-language': currentLang, ...headers },
+      headers: { 'content-type': 'application/json', 'accept-language': currentLang, ...(currentUser ? { 'x-user-id': currentUser } : {}), ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -45,10 +51,13 @@ export const newKey = (prefix) => `${prefix}_${crypto.randomUUID()}`;
 
 export const api = {
   meta: () => get('/api/meta'),
+  personas: () => get('/api/personas'),
+  opsSummary: (inventoryId) => get('/api/ops/summary', { inventory_id: inventoryId }),
+  resetDemo: async () => (await request('POST', '/api/ops/reset-demo', { body: {} })).data,
   cities: () => get('/api/cities'),
   currencies: () => get('/api/currencies'),
   searchHotels: (q) => get('/api/search/hotels', q),
-  aiSearch: async (query, currency) => (await request('POST', '/api/search/ai', { body: { query, currency } })).data,
+  aiSearch: async (query, currency, kind = 'hotels') => (await request('POST', '/api/search/ai', { body: { query, currency, kind } })).data,
   routes: (q) => get('/api/flights/routes', q),
   searchFlights: (q) => get('/api/search/flights', q),
 
