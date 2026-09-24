@@ -97,11 +97,13 @@ partial failure. A timed run-through with speaker notes and fallbacks: [`docs/DE
 
 7. **Two users, one scarce room (mock login)** — the app opens on a **demo login** (no password): pick one of 10 real seeded travellers. Each browser tab keeps its own session. Tab 1: sign in as user A; tab 2: sign in as user B. Both add the same last-unit room to their trip (search hides a room once it is fully held, so add it first), then A clicks **Reserve** (succeeds) and B clicks **Reserve** (rejected: sold out, room named, nothing held). Third tab: sign in as **Operations dashboard** → live holds, bookings, inventory counts, the room in play, who was rejected, and **0 violations**. **Reset demo** returns the stock afterwards.
 
+8. **One-stop flights** — Flights → *To* Jaipur, *From* Bengaluru, 5 Oct: no direct flight, but **One-stop options** list Bengaluru → New Delhi → Jaipur (layover 60 min to 6 h, same airport). **Add to trip** puts both legs in one trip item; **Reserve** holds both seats in one atomic request under one timer, so a sold-out second leg leaves nothing held. Connections come from plain SQL over the same inventory, no AI. The provided seed has too few connecting flights to demo this, so `data-model/migrations/004_hub_flights.sql` adds a daily schedule through New Delhi and Mumbai (extra rows only).
+
 ## 8. Tests / proof
 
 ```bash
 cd backend
-npm test                     # 56 tests, real Postgres (52 pass, 4 skip when a live Gemini key is set)
+npm test                     # 60 tests, real Postgres (56 pass, 4 skip when a live Gemini key is set)
 npm run invariants           # data invariants: oversold / negative / held_drift / booked_drift — all must be 0
 
 # the next two need the server running (`npm start` in another terminal):

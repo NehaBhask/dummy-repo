@@ -58,13 +58,14 @@ export default function HoldPage() {
   async function reserve() {
     const pending = items.filter((i) => i.status !== 'active');
     if (!pending.length) return;
-    const sig = JSON.stringify(pending.map((i) => i.stay));
+    const stays = pending.flatMap((i) => i.stays ?? [i.stay]); // a one-stop flight has two legs, held in the same request
+    const sig = JSON.stringify(stays);
     if (attempt.current?.sig !== sig) attempt.current = { sig, key: newKey('trip') };
     setReserving(true);
     trip.flagSoldOut([]);
     try {
       // One request, one transaction: every row is locked in a fixed order and gets the same deadline, or none is held.
-      const { data } = await api.createHold({ items: pending.map((i) => i.stay), key: attempt.current.key, ttl: trip.settings.ttl });
+      const { data } = await api.createHold({ items: stays, key: attempt.current.key, ttl: trip.settings.ttl });
       attempt.current = null;
       // Holds come back in inventory_id order, so match them to items by inventory id (never by position).
       const byItem = Object.fromEntries(

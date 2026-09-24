@@ -29,7 +29,7 @@ proven by a load test that shows zero oversell.
 | `backend/src/` | Express API. `routes.js` (HTTP contract) → `validation.js` (zod, strict) → `modules/` (`booking/holds.js`, `booking/bookings.js`, `inventory/*`, `payment/mock.js`, `loadtest/engine.js`, `invariants.js`) → `db.js` (pool, deadlock-retrying `withTx`, sorted `lockInventory`). `errors.js` = bilingual error catalogue + Postgres/pool error mapping. |
 | `ai/` | Natural-language search for hotels and flights. Gemini function-calling fills a `search_hotels` / `search_flights` schema (`prompts/`); the result feeds the **same** grounded SQL search as the form (`POST /api/search/ai`, `kind: "hotels" \| "flights"`). Heuristic + cache fallbacks. |
 | `data-model/` | Canonical schema, our additive migrations, seed CSVs, loaders and the conformance validator. See `DATA_MODEL.md`. |
-| `tests/` | 56 automated tests against real Postgres (concurrency races, idempotency, saga, expiry, cancel, HTTP contract, AI parsing). |
+| `tests/` | 60 automated tests against real Postgres (concurrency races, idempotency, saga, expiry, cancel, HTTP contract, AI parsing). |
 | `.github/workflows/` | Three GitHub Actions workflows that fire load from separate machines (see "Proof"). |
 
 ## How correctness is achieved
@@ -77,7 +77,7 @@ tried in turn, 6 s timeout each) → English heuristic parser. The response says
 | Genuinely separate machines | `.github/workflows/distributed-load-test.yml` · `distributed-idempotency-test.yml` |
 | Idempotency under a dropped response | `backend/scripts/simulate-network-retry.mjs` · `network-retry-test.yml` |
 | Data invariants at any moment | `GET /api/invariants` · `npm run invariants` |
-| Automated tests | `npm test` (in `backend/`) — 56 tests |
+| Automated tests | `npm test` (in `backend/`) — 60 tests |
 
 Details and measured numbers: `backend/README.md`.
 
@@ -111,3 +111,7 @@ Request/response shapes and status codes: `backend/README.md` (API section).
 ## Mock login and sessions
 
 The browser sends `X-User-Id` (a seeded active user id, or `operator`); the server checks it against the users table and it wins over any `user_id` in a request body, so one traveller cannot read or cancel another's holds and bookings. A missing header falls back to the demo user, which keeps k6, CI and the load test working unchanged. The operator has no traveller identity (traveller endpoints return 403) and the ops endpoints require it (401/403). **This is demo identity, not authentication:** no passwords, no tokens. Rejected (sold-out) attempts leave no row, so the activity feed keeps them in an in-memory buffer that resets on server restart.
+
+## One-stop flights
+
+`GET /search/flights` returns the direct `results` plus `connections`: pairs of flights where the second leaves the same airport the first landed at, 60 to 360 minutes later (`MIN_LAYOVER_MIN` / `MAX_LAYOVER_MIN` in `modules/inventory/search.js`), with enough free seats on both legs, cheapest first. It is one SQL self-join over the same `inventory_calendar` rows (no AI, no graph library); `connections=false` skips it, `connections_limit` caps it. Each connection carries `stays` (both legs), which the client sends in ONE `POST /holds`: the existing atomic hold locks both rows in order and gives them one deadline, so a connection can never be half-held or oversold, and the saga compensates both lines like any multi-item booking. `GET /flights/routes` also lists origin/destination pairs reachable with one stop. Limits: one stop only, layover must be at the same airport, and the provided flights carry no time zones, so times are compared as stored.

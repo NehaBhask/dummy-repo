@@ -10,7 +10,8 @@ data-model/
 ├── migrations/            OUR additions, additive + idempotent, applied by `npm run migrate`
 │   ├── 001_additions.sql       3 new tables, 1 new column, 1 index, 1 CHECK
 │   ├── 002_create_holds_function.sql   kognivera_create_holds() — the atomic reserve (a function, no new table)
-│   └── 003_load_test_snapshot.sql      1 new column
+│   ├── 003_load_test_snapshot.sql      1 new column
+│   └── 004_hub_flights.sql             demo flights (rows only): daily schedule via New Delhi and Mumbai for one-stop itineraries
 ├── seed/csv/              the 20 canonical CSVs (41,855 rows) — what the demo runs on
 ├── seed/queries/          starter queries;  seed/APS-05.db = SQLite copy of the same data
 └── tools/                 load_data.py · apply_schema.py · validate_postgres.py · validate_conformance.py

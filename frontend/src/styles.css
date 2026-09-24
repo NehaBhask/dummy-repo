@@ -598,3 +598,9 @@ button { cursor: pointer; }
 .stepper output { min-width: 2rem; text-align: center; font-variant-numeric: tabular-nums; }
 .search-panel.hotel-mode { grid-template-columns: 1.4fr 1fr 0.55fr 0.55fr 0.55fr auto; }
 @media (max-width: 900px) { .search-panel.hotel-mode { grid-template-columns: 1fr 1fr; } }
+.flight-card.connection { align-items: start; }
+.stop-badge { margin-left: 0.6rem; vertical-align: middle; font-size: 0.72rem; }
+.legs { list-style: none; margin: 0.5rem 0; padding: 0; display: grid; gap: 0.4rem; }
+.legs li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.9rem; }
+.legs .leg-time { font-weight: 600; }
+.legs .layover { flex-basis: 100%; color: var(--warning-ink); background: color-mix(in oklab, var(--warning) 14%, transparent); border-radius: 8px; padding: 0.15rem 0.5rem; margin-top: 0.3rem; width: fit-content; }

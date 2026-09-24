@@ -228,7 +228,112 @@ export async function searchFlights(q) {
     .slice(0, q.limit ?? 20)
     .map(({ cmp, ...r }) => r);
 
-  return { query: q, currency: q.currency ?? null, fx_rate_date: fx.rateDate, total: results.length, results };
+  const connections = q.connections === false ? [] : await searchConnections(q, fx);
+  return { query: q, currency: q.currency ?? null, fx_rate_date: fx.rateDate, total: results.length, results, connections };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// One-stop connections: two flights where the second leaves the SAME airport the first landed at, between
+// MIN_LAYOVER and MAX_LAYOVER minutes later. Pure SQL over the same inventory rows as direct flights; each leg
+// is reserved through the normal hold path (both rows in one atomic hold), so a connection can never be
+// half-booked or oversold. No AI involved.
+export const MIN_LAYOVER_MIN = 60;
+export const MAX_LAYOVER_MIN = 360;
+
+// One row per flight: its cheapest fare that still has $4 seats free, with the dated inventory row it books from.
+const LEG_CTE = `
+  leg AS (
+    SELECT DISTINCT ON (f.flight_id)
+           f.flight_id, f.flight_number, al.name AS airline, f.departs_at, f.arrives_at, f.duration_minutes, f.stops,
+           f.origin_airport_id, f.dest_airport_id,
+           oa.iata AS origin_iata, oc.name AS origin_city, oc.city_id AS origin_city_id,
+           da.iata AS dest_iata, dc.name AS dest_city, dc.city_id AS dest_city_id,
+           ff.fare_id, ff.cabin_class, ff.fare_class, ff.baggage_kg, ff.cabin_baggage_kg, ff.refundable, ff.changeable,
+           ic.inventory_id, ic.price, ic.currency, ic.for_date,
+           (ic.total_units - ic.booked_units - ic.held_units)::int AS free_seats
+      FROM flights f
+      JOIN airlines al ON al.airline_id = f.airline_id
+      JOIN airports oa ON oa.airport_id = f.origin_airport_id
+      JOIN cities oc   ON oc.city_id = oa.city_id
+      JOIN airports da ON da.airport_id = f.dest_airport_id
+      JOIN cities dc   ON dc.city_id = da.city_id
+      JOIN flight_fares ff ON ff.flight_id = f.flight_id AND ff.status = 'active'
+      JOIN inventory_calendar ic
+        ON ic.entity_type = 'flight_fare' AND ic.entity_id = ff.fare_id
+       AND ic.for_date BETWEEN $3::date AND $3::date + 1
+     WHERE f.status = 'active'
+       AND ic.total_units - ic.booked_units - ic.held_units >= $4
+       AND ($5::text IS NULL OR ff.cabin_class = $5)
+     ORDER BY f.flight_id, ic.price
+  )`;
+
+const CONNECTION_SQL = `
+  WITH ${LEG_CTE}
+  SELECT to_jsonb(a) AS a, to_jsonb(b) AS b
+    FROM leg a
+    JOIN leg b
+      ON b.origin_airport_id = a.dest_airport_id
+     AND b.departs_at BETWEEN a.arrives_at + make_interval(mins => ${MIN_LAYOVER_MIN})
+                          AND a.arrives_at + make_interval(mins => ${MAX_LAYOVER_MIN})
+   WHERE a.for_date = $3::date
+     AND (lower(a.origin_city) = lower($1) OR a.origin_iata = upper($1))
+     AND (lower(b.dest_city) = lower($2) OR b.dest_iata = upper($2))
+     AND a.origin_city_id <> b.dest_city_id
+     AND a.dest_city_id <> a.origin_city_id AND b.dest_city_id <> a.dest_city_id`;
+
+function shapeLeg(l, fx, out, seats) {
+  const price = convert(fx, String(l.price), l.currency, out);
+  return {
+    cmp: D(price),
+    leg: {
+      flight: {
+        flight_id: l.flight_id, flight_number: l.flight_number, airline: l.airline,
+        origin: { iata: l.origin_iata, city: l.origin_city }, destination: { iata: l.dest_iata, city: l.dest_city },
+        departs_at: new Date(l.departs_at).toISOString(), arrives_at: new Date(l.arrives_at).toISOString(),
+        duration_minutes: l.duration_minutes, stops: l.stops,
+      },
+      fare: {
+        fare_id: l.fare_id, cabin_class: l.cabin_class, fare_class: l.fare_class, baggage_kg: l.baggage_kg,
+        cabin_baggage_kg: l.cabin_baggage_kg, refundable: l.refundable, changeable: l.changeable,
+      },
+      available_seats: l.free_seats,
+      inventory_id: l.inventory_id,
+      stay: { entity_type: 'flight_fare', entity_id: l.fare_id, for_date: String(l.for_date).slice(0, 10), nights: 1, units: seats },
+      price: moneyOut(fx, price, out),
+    },
+  };
+}
+
+/** One-stop itineraries origin -> hub -> destination that leave on `date`, cheapest first. */
+export async function searchConnections(q, fx = null) {
+  fx ??= await fxContext();
+  if (q.currency) assertCurrency(fx, q.currency);
+  const seats = q.seats ?? 1;
+  const { rows } = await pool.query(CONNECTION_SQL, [q.origin, q.destination, q.date, seats, q.cabin ?? null]);
+
+  return rows
+    .map(({ a, b }) => {
+      const out = q.currency ?? a.currency;
+      const l1 = shapeLeg(a, fx, out, seats);
+      const l2 = shapeLeg(b, fx, out, seats);
+      const total = money(l1.cmp.plus(l2.cmp));
+      return {
+        cmp: D(total),
+        hub: { iata: a.dest_iata, city: a.dest_city },
+        layover_minutes: Math.round((new Date(b.departs_at) - new Date(a.arrives_at)) / 60000),
+        total_duration_minutes: Math.round((new Date(b.arrives_at) - new Date(a.departs_at)) / 60000),
+        available_seats: Math.min(a.free_seats, b.free_seats),
+        legs: [l1.leg, l2.leg],
+        // What a client passes to POST /api/holds: both legs in one request, so they are held (or refused) together.
+        stays: [l1.leg.stay, l2.leg.stay],
+        inventory_ids: [l1.leg.inventory_id, l2.leg.inventory_id],
+        price: moneyOut(fx, total, out),
+      };
+    })
+    .filter((c) => q.max_price == null || c.cmp.lte(q.max_price))
+    .sort((x, y) => x.cmp.cmp(y.cmp) || x.total_duration_minutes - y.total_duration_minutes)
+    .slice(0, q.connections_limit ?? 10)
+    .map(({ cmp, ...c }) => c);
 }
 
 /** Scarce rows worth racing (starter query #1): few units, 1–3 still free. */
@@ -272,5 +377,36 @@ export async function flightRoutes({ origin = null, destination = null } = {}) {
       LIMIT 80`,
     [destination, origin],
   );
-  return rows;
+  if (!destination && !origin) return rows;
+
+  // Also offer the routes reachable with one stop (a one-stop itinerary leaves on the first leg's date).
+  const conn = await pool.query(
+    `WITH leg AS (
+       SELECT f.origin_airport_id, f.dest_airport_id, f.departs_at, f.arrives_at, ic.for_date
+         FROM inventory_calendar ic
+         JOIN flight_fares ff ON ff.fare_id = ic.entity_id
+         JOIN flights f ON f.flight_id = ff.flight_id AND f.status = 'active'
+        WHERE ic.entity_type = 'flight_fare' AND ic.for_date >= CURRENT_DATE
+          AND ic.total_units - ic.booked_units - ic.held_units >= 1)
+     SELECT oc.name AS origin, dc.name AS destination, array_agg(DISTINCT a.for_date::text) AS dates
+       FROM leg a
+       JOIN leg b ON b.origin_airport_id = a.dest_airport_id
+                 AND b.departs_at BETWEEN a.arrives_at + make_interval(mins => ${MIN_LAYOVER_MIN})
+                                      AND a.arrives_at + make_interval(mins => ${MAX_LAYOVER_MIN})
+       JOIN airports oa ON oa.airport_id = a.origin_airport_id JOIN cities oc ON oc.city_id = oa.city_id
+       JOIN airports ha ON ha.airport_id = a.dest_airport_id   JOIN cities hc ON hc.city_id = ha.city_id
+       JOIN airports da ON da.airport_id = b.dest_airport_id   JOIN cities dc ON dc.city_id = da.city_id
+      WHERE oc.city_id <> dc.city_id AND hc.city_id <> oc.city_id AND hc.city_id <> dc.city_id
+        AND ($1::text IS NULL OR lower(dc.name) = lower($1))
+        AND ($2::text IS NULL OR lower(oc.name) = lower($2))
+      GROUP BY oc.name, dc.name`,
+    [destination, origin],
+  );
+  const byKey = new Map(rows.map((r) => [`${r.origin}|${r.destination}`, r]));
+  for (const c of conn.rows) {
+    const hit = byKey.get(`${c.origin}|${c.destination}`);
+    if (hit) hit.dates = [...new Set([...hit.dates, ...c.dates])].sort();
+    else byKey.set(`${c.origin}|${c.destination}`, { ...c, dates: [...c.dates].sort() });
+  }
+  return [...byKey.values()].sort((x, y) => y.dates.length - x.dates.length || x.origin.localeCompare(y.origin));
 }

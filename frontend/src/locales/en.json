@@ -476,5 +476,12 @@
   "ops.resetBody": "This releases every active hold and cancels every confirmed booking that the 10 demo users made in the app, returning the stock. Nothing is deleted and the provided seed data is not touched.",
   "ops.resetConfirm": "Reset demo",
   "ops.resetDone": "Released {holds} hold(s) and cancelled {bookings} booking(s).",
-  "hotel.booked": "Already booked"
+  "hotel.booked": "Already booked",
+  "trip.viaHub": "1 stop via {city}",
+  "trip.layover": "{time} layover",
+  "search.connectionCount": "{n} with one stop",
+  "search.directFlights": "Direct flights",
+  "search.connectionsHeading": "One-stop options",
+  "search.connectionsNote": "Two flights booked together: both seats are held at once, so you never end up with only one leg. The connection is at least an hour long.",
+  "search.totalTime": "{time} total"
 }

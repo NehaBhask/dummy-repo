@@ -86,6 +86,8 @@ export const flightQuery = z.object({
   max_price: z.coerce.number().positive().optional(),
   currency: currency.optional(),
   limit: int(1, 50, 20),
+  connections: bool.optional(), // one-stop itineraries alongside direct flights (included unless false)
+  connections_limit: int(1, 30, 10),
 });
 
 export const aiSearchBody = z.object({

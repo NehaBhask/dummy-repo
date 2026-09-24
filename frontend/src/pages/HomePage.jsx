@@ -54,7 +54,7 @@ export default function HomePage() {
     let live = true;
     setAvail('checking');
     api.searchFlights({ origin: flight.origin, destination: flight.destination, date: flight.date, seats: flight.seats, currency })
-      .then((r) => live && setAvail(r.results.length ? 'ok' : 'none'))
+      .then((r) => live && setAvail(r.results.length || r.connections?.length ? 'ok' : 'none'))
       .catch(() => live && setAvail('ok')); // a failed check must not block the search; the results page reports errors
     return () => { live = false; };
   }, [tab, routes, flight.origin, flight.destination, flight.date, flight.seats, currency]);

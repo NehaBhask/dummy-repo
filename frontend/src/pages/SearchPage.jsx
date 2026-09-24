@@ -442,9 +442,34 @@ function FlightResults({ params, setQuery }) {
     navigate('/hold');
   }
 
+  // A one-stop itinerary is one trip item with two legs: Reserve holds both in the same request.
+  function addConnectionToTrip(c) {
+    const ids = c.inventory_ids;
+    const dup = trip.items.some((i) => i.kind === 'flight' && i.inventoryIds?.some((x) => ids.includes(x)));
+    if (dup) {
+      toast(t('trip.alreadyAdded'), 'info');
+    } else {
+      const [a, b] = c.legs;
+      const released = trip.addItem({
+        kind: 'flight',
+        title: `${a.flight.origin.city} → ${c.hub.city} → ${b.flight.destination.city}`,
+        subtitle: `${date(a.stay.for_date)} · ${a.flight.flight_number} + ${b.flight.flight_number} · ${t('trip.viaHub', { city: c.hub.city })} · ${t('trip.layover', { time: hm(c.layover_minutes) })} · ${a.stay.units} ${t('trip.seats')}`,
+        units: a.stay.units,
+        city: b.flight.destination.city,
+        stay: a.stay,
+        stays: c.stays,
+        inventoryIds: ids,
+        total: c.price,
+      });
+      toast(released ? t('trip.reservationReset') : t('trip.flightAdded'), released ? 'info' : 'good');
+    }
+    navigate('/hold');
+  }
+
   const status = q ? aiState.status : state.status;
   const error = q ? aiState.error : state.error;
   const results = q ? (ai?.results ?? []) : (state.data?.results ?? []);
+  const connections = q ? [] : (state.data?.connections ?? []);
   const cities = bookable.length ? bookable : [{ name: destination }];
 
   return (
@@ -453,7 +478,7 @@ function FlightResults({ params, setQuery }) {
         <div>
           <p className="eyebrow">{day ? date(day, { day: 'numeric', month: 'short' }) : '—'} · {t('search.travellers', { n: seats })}</p>
           <h1>{t('search.flightsHeadline', { city: destination })}</h1>
-          <p className="muted">{status === 'loading' ? t('common.loading') : t(results.length === 1 ? 'search.flightCount1' : 'search.flightCount', { n: results.length })}</p>
+          <p className="muted">{status === 'loading' ? t('common.loading') : t(results.length === 1 ? 'search.flightCount1' : 'search.flightCount', { n: results.length })}{connections.length > 0 && ` · ${t('search.connectionCount', { n: connections.length })}`}</p>
         </div>
         <TypeSwitch type="flights" setQuery={setQuery} />
       </div>
@@ -490,8 +515,9 @@ function FlightResults({ params, setQuery }) {
       <ErrorBanner error={error} />
       {!q && routes?.length === 0 && <Empty icon={Plane} title={t('trip.noRoutes', { city: destination })} />}
       {status === 'loading' && results.length === 0 && <Skeleton h={130} />}
-      {!q && state.data && results.length === 0 && routes?.length > 0 && <Empty icon={Plane} title={t('trip.noFlights')} />}
+      {!q && state.data && results.length === 0 && connections.length === 0 && routes?.length > 0 && <Empty icon={Plane} title={t('trip.noFlights')} />}
 
+      {connections.length > 0 && results.length > 0 && <h2 className="section-h">{t('search.directFlights')}</h2>}
       <section className="results-list flights">
         {results.map((r) => (
           <article key={r.fare.fare_id} className="flight-card">
@@ -514,6 +540,44 @@ function FlightResults({ params, setQuery }) {
           </article>
         ))}
       </section>
+
+      {connections.length > 0 && (
+        <>
+          <h2 className="section-h">{t('search.connectionsHeading')}</h2>
+          <p className="muted small">{t('search.connectionsNote')}</p>
+          <section className="results-list flights">
+            {connections.map((c) => (
+              <article key={c.inventory_ids.join('+')} className="flight-card connection">
+                <div className="result-icon small" aria-hidden="true"><Plane size={28} /></div>
+                <div className="flight-main">
+                  <p className="flight-route">
+                    {c.legs[0].flight.origin.iata}<span className="arrow">→</span>{c.hub.iata}<span className="arrow">→</span>{c.legs[1].flight.destination.iata}
+                    <span className="badge info stop-badge">{t('trip.viaHub', { city: c.hub.city })}</span>
+                  </p>
+                  <ol className="legs">
+                    {c.legs.map((l, i) => (
+                      <li key={l.inventory_id}>
+                        <span className="leg-time mono">{time(l.flight.departs_at)} – {time(l.flight.arrives_at)}</span>
+                        <span>{l.flight.origin.iata} → {l.flight.destination.iata}</span>
+                        <span className="muted small">{l.flight.airline} {l.flight.flight_number} · {hm(l.flight.duration_minutes)}</span>
+                        {i === 0 && <span className="layover small">{t('trip.layover', { time: hm(c.layover_minutes) })} · {c.hub.city}</span>}
+                      </li>
+                    ))}
+                  </ol>
+                  <p className="muted small">{t('search.totalTime', { time: hm(c.total_duration_minutes) })} · {t(`cabin.${c.legs[0].fare.cabin_class}`)}</p>
+                </div>
+                <div className="flight-cta">
+                  <span className={`badge ${c.available_seats <= 3 ? 'warn' : 'good'}`}>{t('trip.seatsLeft', { n: c.available_seats })}</span>
+                  <strong className="price">{c.price.display}</strong>
+                  <button className="btn primary" onClick={() => addConnectionToTrip(c)}>{t('trip.addToTrip')}</button>
+                </div>
+              </article>
+            ))}
+          </section>
+        </>
+      )}
     </>
   );
 }
+
+const hm = (mins) => `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;

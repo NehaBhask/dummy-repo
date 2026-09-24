@@ -12,7 +12,7 @@ docker compose up -d                 # repo root: Postgres on :5433 (already loa
 cd backend && npm install
 npm run migrate                      # additive tables/columns only (data-model/migrations/001_additions.sql), idempotent
 npm start                            # http://localhost:3000   (cp ../.env.example .env to configure)
-npm test                             # 56 tests (in ../tests/) against the real Postgres — see "Testing"
+npm test                             # 60 tests (in ../tests/) against the real Postgres — see "Testing"
 npm run invariants                   # the correctness queries; exit code 1 if any fail
 npm run loadtest -- --requests 500   # race 500 requests at a scarce row; run while `npm start` is up
 ```
@@ -246,7 +246,7 @@ No auth: requests without `user_id` act as the demo user (`GET /api/demo-user`).
 | | |
 |---|---|
 | `GET /api/search/hotels` | `city, check_in, nights, rooms, adults, children, max_price, min_stars, breakfast, refundable, currency, sort, limit` → hotels → rooms (with `stay` to pass to `/holds`, live `available_units`, rate-plan `options`) |
-| `GET /api/search/flights` | `origin, destination, date, seats, cabin, max_price, currency` |
+| `GET /api/search/flights` | `origin, destination, date, seats, cabin, max_price, currency, connections (default on), connections_limit` → direct `results` plus one-stop `connections` (`legs[2]`, `hub`, `layover_minutes`, `total_duration_minutes`, `stays[2]` to pass to `/holds` together) |
 | `POST /api/search/ai` | `{query, currency?}` English/Hindi → parsed params + results (+ summary with Gemini). `parser` says who answered |
 | `POST /api/holds` | **`Idempotency-Key` header required.** `{items:[{inventory_id,units} \| {entity_type,entity_id,for_date,nights,units}], ttl_seconds?}` → `201` (or `200` + `Idempotent-Replayed: true`). `409 sold_out` |
 | `GET /api/holds/:id` · `POST /api/holds/:id/release` | hold + `seconds_remaining` (for the countdown) |

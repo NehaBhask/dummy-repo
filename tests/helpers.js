@@ -65,6 +65,9 @@ export async function cleanupTestData() {
   await pool.query('DELETE FROM booking_items WHERE booking_id = ANY($1::text[])', [bookingIds]);
   await pool.query('DELETE FROM bookings WHERE booking_id = ANY($1::text[])', [bookingIds]);
   await pool.query(`DELETE FROM inventory_calendar WHERE for_date >= '${FIXTURE_FROM}'`);
+  // flights fabricated by connections.test.js (fixture ids are prefixed, the provided flights never are)
+  await pool.query("DELETE FROM flight_fares WHERE fare_id LIKE 'far\_t%'");
+  await pool.query("DELETE FROM flights WHERE flight_id LIKE 'flt\_t%'");
 }
 
 export async function finish() {
