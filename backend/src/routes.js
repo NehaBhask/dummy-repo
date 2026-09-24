@@ -13,7 +13,7 @@ import { getInventory, resolveHoldItems } from './modules/inventory/availability
 import { findContendedInventory, searchFlights, searchHotels } from './modules/inventory/search.js';
 import { createHold, getHold, releaseHold } from './modules/booking/holds.js';
 import { cancelBooking, confirmBooking, getBooking, listBookings } from './modules/booking/bookings.js';
-import { aiSearch } from './modules/ai/search.js';
+import { aiSearch } from '../../ai/search.js';
 import { getRun, listRuns, publicRun, runLoadTest, startLoadTest } from './modules/loadtest/engine.js';
 
 export function buildRouter({ worker } = {}) {

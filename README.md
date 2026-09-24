@@ -1,94 +1,125 @@
-# APS-05 — Distributed Booking & Inventory System
+# Kognivera — Distributed Booking & Inventory (APS-05)
 
-**Start here.** This folder holds the data your team has been given for this problem statement, and the process for the design submission and hackathon day. The statement itself, its 24-hour scope and the XR requirement are on your statement's page in the hackathon application.
+## 1. Team & Problem Statement
 
-Kognivera Hackathon 2026 · Travel & Tourism · data model v1.1.0-rc1
+- **Team:** `--rebase` — Thijesh, Tejas, Yogita, Neha
+- **Problem statement:** **APS-05 — Distributed Booking & Inventory System.** A booking and inventory service that
+  never oversells under concurrency. Full text: [`docs/problem-statement/ps_description.md`](docs/problem-statement/ps_description.md).
 
-## The seven steps, in order
+## 2. What we built
 
-### 1 · Read your statement in the application — 30 minutes
+Mapped to the PS's "What you need to build" checklist — each item is wired end to end and reachable from the app:
 
-The problem statement, the 24-hour MVP scope, what a complete solution looks like and the XR device requirement all live on your statement's page in the hackathon application. Read all of it, including the parts that describe the full ambition — that is deliberately larger than what you will build.
+- **Availability search with a TTL hold** — hotel + flight search (form and natural language); items go into **My trip** (nothing held yet), then one **Reserve** holds the whole trip atomically — hotel and flight share a single server-clamped TTL (5 s – 30 min) and one live countdown.
+- **Confirm with payment; release on timeout** — `POST /api/bookings` captures a (mock) payment; a background sweep expires abandoned holds, and a late confirm is refused at confirm time regardless of the sweep.
+- **No overbooking under concurrent requests** — one transaction: `SELECT … FOR UPDATE` on the inventory row(s), check, then update (on the hot path a single Postgres function). The DB `CHECK` is only a safety net and is asserted never to fire.
+- **Idempotent booking API** — `Idempotency-Key` on every write, `INSERT … ON CONFLICT DO NOTHING`; a retried request returns the original result and never books twice (concurrent retries and retry-after-dropped-response are both tested).
+- **Multi-item saga with compensation** — hotel + flight in one booking; if any line or the payment fails, every confirmed line is rolled back and the response says why.
+- **Cancellation with restock; localised currency** — cancel refunds and returns units to the pool; prices convert through the dated `fx_rates` table (INR / USD / EUR / …), original amounts never overwritten.
+- **The standout deliverable — a load test that shows zero oversell** — in-app (Load test page and the live System Visualizer), k6, GitHub Actions from separate machines, and a mixed confirm / abandoned-hold scenario that ends with a closing-balance assertion.
 
-### 2 · Fix your scope — 15 minutes
+## 3. Architecture
 
-The MVP scope on that page is what you are actually building in 24 hours, and it is what your design will be read against. The gap between the full ambition and the MVP is not an oversight: deciding what to leave out, and being able to say why, is a large part of what separates a strong team from a busy one.
-
-### 3 · Understand your data — 45 minutes
-
-`01_YOUR_DATA_MODEL.pdf` lists all 20 tables you have been given — 14 that this statement lives in, plus reference tables — with every field.
-
-Then do two things rather than just reading:
-
-- **Open `02_DATA_MODEL_DIAGRAM.html`.** Download it first and open it from your own machine; SharePoint hands HTML over as a download rather than rendering it. It shows only your tables. Click each one.
-- **Run `data/queries/starter_queries.sql`.** 7 queries, each with a comment explaining what it shows, all of them running as-is against `data/APS-05.db`:
-
-```bash
-sqlite3 data/APS-05.db < data/queries/starter_queries.sql
+```
+frontend/ (React + Vite, en/हिन्दी) ──/api──► backend/ (Express 5) ──pg pool──► PostgreSQL 16
+                                                 │  routes → validation → booking · inventory · payment · loadtest
+                                                 │  workers/expiry (30 s sweep, advisory-locked)
+                                                 └─imports─► ai/ (Gemini function-calling + prompts + fallbacks)
 ```
 
-That is 41,855 rows of real, queryable travel data. It is fully synthetic — no real people, no personal data — so it is safe to commit to a public repository.
+One process serves the API and the built web app. Component-by-component notes, how each guarantee is met, the API
+table and the known limitations: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Deep-dive with measured numbers:
+[`backend/README.md`](backend/README.md).
 
-Before you write code, read `data/WORKING_WITH_THE_DATA.md`. It is short, and it covers the three conventions that cost teams the most time: money is a string and must never touch a float, IDs are opaque and must not be parsed, and language is a BCP-47 tag.
+## 4. Data model
 
-### 4 · Design it — this week
+We use the **canonical APS-05 model unchanged** (names and columns kept). Tables the code touches:
+`inventory_calendar` (the contended resource), `holds`, `bookings`, `booking_items`, `payments`, `hotels`,
+`hotel_room_types`, `hotel_rate_plans`, `cities`, `flights`, `flight_fares`, `airports`, `airlines`, `users`,
+`currencies`, `fx_rates`.
 
-`03_DESIGN_SUBMISSION_GUIDE` lists exactly what your design document must contain: scope in and out, user journey, architecture, which tables you will use and what you are adding, your AI approach and how you will know it works, the tech stack, an hour-by-hour plan for the 24 hours, and your fallbacks.
+**Tables we added (all additive, rule R1):** `load_test_runs`, `load_test_results`, `search_logs`.
+**Columns / constraints / indexes we added:** `booking_items.hold_id`, `load_test_runs.snapshot`,
+`CHECK (booked_units >= 0 AND held_units >= 0)`, a partial index on active holds, and the
+`kognivera_create_holds()` function. Nothing canonical is renamed, dropped or repurposed.
 
-### 5 · Submit the design — by 2 September
+Full mapping, why each addition exists, and where every boundary rule is enforced in code and tested:
+[`data-model/DATA_MODEL.md`](data-model/DATA_MODEL.md).
 
-Through the hackathon application. Accepted formats, the 25 MB per-file limit and the 10-file limit are all in `03_DESIGN_SUBMISSION_GUIDE`.
+## 5. AI features
 
-> **You get one upload, and it locks.** There is no replace and no second attempt. Assemble everything, have someone outside the team read it, then upload.
-
-### 6 · Build — 24 September 12:00 to 25 September 12:00
-
-`04_HACKATHON_DAY_PROCESS` covers the whole thing: what to have ready beforehand, how the day runs, mentors, the 09:00 rule on the second morning, and what you submit at 12:00.
-
-### 7 · Present — 25 September, after lunch. Finale 26 September
-
-Presentations start post-lunch on the 25th. Results and prizes on the 26th. Also in `04_HACKATHON_DAY_PROCESS`.
-
----
-
-## What is in this folder
-
-| File | What it is |
-|---|---|
-| `01_YOUR_DATA_MODEL.md` / `.pdf` | Every table and field you have been given, and what each one is for. The PDF previews in SharePoint; the markdown is easier to search. |
-| `02_DATA_MODEL_DIAGRAM.html` | Clickable diagram of your tables. Download, then open in a browser. |
-| `03_DESIGN_SUBMISSION_GUIDE.md` / `.pdf` | What to submit on 2 September, in what format, and how. |
-| `04_HACKATHON_DAY_PROCESS.md` / `.pdf` | How 24–26 September run. |
-| `data/APS-05.db` | SQLite, indexed, only your tables. No setup. |
-| `data/csv/` | The same rows as CSV, numbered in load order. |
-| `data/queries/starter_queries.sql` | Queries that run as-is. Start here. |
-| `data/schema.sql` · `data/schema.sqlite.sql` | DDL for your tables. |
-| `data/enums.json` | The legal values for every enum column. |
-| `data/WORKING_WITH_THE_DATA.md` | Loading instructions and the conventions. |
-| `tools/validate_conformance.py` | Checks your data still conforms. Run it early. |
-| `SHA256SUMS.txt` | `sha256sum -c SHA256SUMS.txt` to confirm your copy is intact. |
-
----
-
-## Your deliverables and dates
-
-| Date | What is due | Where |
+| Capability | Mechanism | How it is grounded |
 |---|---|---|
-| **2 September 2026** | Design submission — one upload, then locked | Hackathon application |
-| By 17 September 2026 | Teams confirmed | — |
-| **24 Sep 12:00 → 25 Sep 12:00** | The 24-hour build | On the day |
-| **25 September, 12:00** | Running demo · solution write-up · final presentation · source repository and architecture note | On the day |
-| 25 September, post-lunch | Presentations | On the day |
-| 26 September 2026 | Finale and prizes | On the day |
+| **Natural-language search** in English and Hindi (e.g. "3-star hotel in Jaipur for 2 adults, Oct 10-12, under ₹5000") | Gemini **function calling** (`ai/prompts/search_hotels.tool.json`, system prompt `ai/prompts/search_system.md`); 3 models tried in turn with a 6 s timeout each | The model **only fills search parameters**; the result comes from the same SQL the form uses, so every room shown is a real row with real availability. City names are constrained to the cities in the database. |
+| **Comparison summary** of the top results | Gemini text generation (`ai/prompts/summarise.md`) | Prompt says "use only this data" and receives only the top 3 result rows; failure never fails the search. |
+| **Graceful degradation** | Pre-seeded cache for the demo queries → Gemini → small English heuristic parser | Every response reports `parser: cache \| gemini \| heuristic`, and the UI shows which one answered. |
 
----
+Code: [`ai/search.js`](ai/search.js). Tests: `tests/ai.test.js`.
 
-## Two things worth knowing now
+## 6. Run it locally
 
-**A working build beats a polished deck.** Every statement is expected to show a genuine, working AI feature — not a mock, not a screenshot.
+Prerequisites: Node ≥ 20, Docker Desktop, Python 3 (for the seed loader).
 
-**Multilingual support matters.** At least one Indian language, wherever it is natural to your statement. The data is already multilingual, so this is less work than it sounds.
+```bash
+# 1. Postgres (port 5433)
+docker compose up -d
 
-## Where to ask
+# 2. Schema + seed data (canonical schema, then the 20 CSVs = 41,855 rows)
+pip install -r data-model/tools/requirements.txt
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5433/kognivera
+python data-model/tools/apply_schema.py --schema data-model/schema.sql
+python data-model/tools/load_data.py --csv-dir data-model/seed/csv
 
-Questions about **the data** go to the data channel named in the email that sent you this folder. Questions about **the process, the application or the dates** go to the organisers. Not DMs, and not your college group — an answer given once, in the right place, reaches everyone.
+# 3. Backend: env, our additive migrations, web build, start
+cp .env.example backend/.env              # add GEMINI_API_KEY for live AI search (optional — see below)
+cd backend
+npm install
+npm run migrate                           # applies data-model/migrations/*.sql, idempotent
+npm run build:web                         # builds frontend/ into frontend/dist
+npm start                                 # → http://localhost:3000
+```
+
+Open **http://localhost:3000**. Without `GEMINI_API_KEY` the app still runs: the demo "Try:" queries are pre-cached
+and other English queries use the heuristic parser (Hindi free text needs the key).
+For live front-end development run `npm run dev` in `frontend/` (port 5173, proxies `/api` to :3000).
+
+## 7. Demo path
+
+The exact click-path (≈6 min) that reaches the terminal outcome — a booking that survives concurrency, retries and
+partial failure. A timed run-through with speaker notes and fallbacks: [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
+
+1. **Search** — click the Hindi chip `जयपुर में 2 रातों के लिए होटल, ₹5000 से कम` → results are real rooms with live availability ("Gemini" / "Cached" badge).
+2. **Add to trip** — **View stay** on a hotel marked "Only N left" → pick a room and rate plan → **Add to trip**. Nothing is held yet (the inventory count is unchanged).
+3. **Reserve + saga rollback** — **Add a flight** (Add to trip), then **Reserve for 10 min**: one atomic hold, one shared countdown, and only now does **Pay now** unlock. Open **Demo controls** → *Simulate a failure at checkout* → *Flight sells out (hotel is rolled back)* → **Fill test details** → **Pay now** → the hotel is compensated and its room returns to inventory; nothing is left half-booked.
+4. **Idempotency** — on a confirmed booking click **Retry the same request** → "Same booking returned. Nothing was booked twice."
+5. **Cancel + restock** — **My bookings → Cancel booking** → refunded, room back on sale; switch currency in the header to see localised prices.
+6. **Zero oversell (the standout proof)** — **Load test** page → the scarcest room is pre-selected → **Fire N requests** → the verdict reads the database, not the responses: *"Zero oversell: all checks passed"*. To watch the same guarantees animate from real data, open **System Visualizer → Live backend** and run the race, saga or duplicate-retry scenario.
+
+## 8. Tests / proof
+
+```bash
+cd backend
+npm test                     # 48 tests, real Postgres (45 pass, 3 skip when a live Gemini key is set)
+npm run invariants           # data invariants: oversold / negative / held_drift / booked_drift — all must be 0
+
+# the next two need the server running (`npm start` in another terminal):
+npm run loadtest             # the hard proof, CLI: N concurrent holds for the last units → exactly the free units granted
+npm run loadtest:mixed       # mixed scenario: winners confirm, the rest abandon and expire → closing balance PASS/FAIL
+```
+
+- **The hard-proof test** (PS: *"a load test that shows zero oversell"*): `tests/holds.test.js` (200 concurrent requests for the last 3 units → exactly 3 succeed, 197 sold out), `tests/api.test.js` (300 over HTTP; every request sent 3× with the same key never double-books), and the in-app Load test tab.
+- **Mixed scenario** ([`backend/scripts/mixed-loadtest.mjs`](backend/scripts/mixed-loadtest.mjs)): after a race, half of the winners confirm and half abandon their holds past the TTL; it then asserts `booked + held + available == total` against figures derived from the individual hold records, that no expired hold still holds stock, and zero oversell throughout. It also *fails* when the expiry sweep is disabled — the assertion is not vacuous.
+- **From separate machines:** `.github/workflows/distributed-load-test.yml` and `distributed-idempotency-test.yml` fire from a GitHub Actions matrix, then verify against the database (`gh workflow run …`).
+- **k6:** `k6 run scripts/k6-loadtest.js` (from `backend/`) — its `teardown()` checks `/api/invariants` directly.
+- **Schema conformance:** `python data-model/tools/validate_postgres.py --csv-dir data-model/seed/csv --conformance-script data-model/tools/validate_conformance.py` (row counts are exact against a freshly seeded database; load-test and demo rows are extras by design, since nothing is ever hard-deleted).
+- Test index and what each file covers: [`tests/README.md`](tests/README.md).
+
+## Repository layout
+
+```
+README.md            this file                      .env.example        every variable, dummy values
+frontend/            React UI                       data-model/         schema, migrations, seed, DATA_MODEL.md
+backend/             API, workers, load-test tools  ai/                 NL search: code + prompts
+tests/               automated tests                docs/               architecture, demo script, design, PS
+.github/workflows/   distributed proofs             docker-compose.yml  local Postgres
+```

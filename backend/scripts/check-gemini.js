@@ -1,6 +1,6 @@
 import { config } from '../src/config.js';
 import { closePool } from '../src/db.js';
-import { aiSearch } from '../src/modules/ai/search.js';
+import { aiSearch } from '../../ai/search.js';
 
 // Verifies the live Gemini path end to end. Usage: node scripts/check-gemini.js ["your own query"]
 // For each query it prints who answered (gemini | heuristic), what was extracted, and how many

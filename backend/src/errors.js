@@ -1,5 +1,5 @@
 // Error model. `code` is stable and machine-readable (it reuses the error_code enum from
-// data/enums.json where one fits); `message` is localised (en / hi).
+// data-model/enums.json where one fits); `message` is localised (en / hi).
 
 const CATALOGUE = {
   validation_error: {

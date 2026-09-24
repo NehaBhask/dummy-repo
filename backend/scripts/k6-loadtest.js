@@ -8,6 +8,8 @@
 // Run:      k6 run scripts/k6-loadtest.js
 //           k6 run -e BASE_URL=https://your-tunnel-or-deploy -e VUS=500 scripts/k6-loadtest.js
 //           k6 run -e VUS=500 -e BYPASS_SHIELD=false scripts/k6-loadtest.js   (production path)
+//           Graph of the race (live at http://127.0.0.1:5665 while running, plus an HTML file):
+//             K6_WEB_DASHBOARD=true K6_WEB_DASHBOARD_EXPORT=race-report.html k6 run -e VUS=500 -e RAMP_SECONDS=10 scripts/k6-loadtest.js
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
@@ -24,14 +26,23 @@ const otherError = new Counter('holds_other_error');
 const networkError = new Counter('holds_network_error'); // never reached the server (see default())
 const holdLatency = new Trend('hold_latency_ms', true);
 
+// RAMP_SECONDS=0 (default): all VUS fire in one instant (sharpest race, too short for a k6 graph).
+// RAMP_SECONDS>0: the same VUS requests are spread evenly over that many seconds, so the k6 web
+// dashboard / HTML report has enough data to plot, and the OS accept queue isn't hit by one burst.
+const RAMP_SECONDS = Number(__ENV.RAMP_SECONDS || 0);
+
 export const options = {
   scenarios: {
-    race: {
-      executor: 'per-vu-iterations',
-      vus: VUS,
-      iterations: 1,
-      maxDuration: '60s',
-    },
+    race: RAMP_SECONDS > 0
+      ? {
+          executor: 'constant-arrival-rate',
+          rate: VUS,
+          timeUnit: `${RAMP_SECONDS}s`,
+          duration: `${RAMP_SECONDS}s`,
+          preAllocatedVUs: Math.min(VUS, 200),
+          maxVUs: VUS,
+        }
+      : { executor: 'per-vu-iterations', vus: VUS, iterations: 1, maxDuration: '60s' },
   },
   // Not a pass/fail gate on its own — the real one is the invariant check() in teardown().
   thresholds: { holds_other_error: ['count==0'] },
@@ -53,7 +64,8 @@ export function setup() {
 
 export default function (data) {
   // 8-char idempotency-key floor (backend/src/validation.js) — pad regardless of __VU width.
-  const key = `${TAG}-${String(__VU).padStart(6, '0')}`;
+  // A VU can run several iterations in ramp mode, so the key needs __ITER too or retries would collide.
+  const key = `${TAG}-${String(__VU).padStart(5, '0')}-${String(__ITER).padStart(4, '0')}`;
   const headers = { 'Content-Type': 'application/json', 'Idempotency-Key': key };
   if (BYPASS_SHIELD) headers['X-Bypass-Shield'] = '1';
 

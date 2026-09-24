@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { pool, closePool } from '../src/db.js';
 
-const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'sql');
+const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'data-model', 'migrations');
 const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
 
 try {

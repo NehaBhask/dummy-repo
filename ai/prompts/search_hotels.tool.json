@@ -1,0 +1,23 @@
+{
+  "name": "search_hotels",
+  "description": "Search bookable hotel rooms. Fill only what the traveller stated or clearly implied.",
+  "parameters": {
+    "type": "OBJECT",
+    "properties": {
+      "city": { "type": "STRING", "description": "City name in English, exactly as in the allowed list." },
+      "check_in_date": { "type": "STRING", "description": "YYYY-MM-DD arrival date." },
+      "nights": { "type": "INTEGER", "description": "Number of nights." },
+      "rooms": { "type": "INTEGER", "description": "Number of rooms." },
+      "adults": { "type": "INTEGER", "description": "Number of adult guests in total." },
+      "max_price_per_night": { "type": "NUMBER", "description": "Budget ceiling per night." },
+      "currency": { "type": "STRING", "description": "ISO-4217 code of the budget, e.g. INR for ₹ / रुपये." },
+      "star_rating": { "type": "INTEGER", "description": "Minimum star rating (1-5)." },
+      "preferences": {
+        "type": "ARRAY",
+        "items": { "type": "STRING", "enum": ["breakfast", "refundable"] },
+        "description": "breakfast = breakfast included / नाश्ता; refundable = free cancellation."
+      }
+    },
+    "required": ["city"]
+  }
+}

@@ -59,6 +59,7 @@ export const api = {
 
   confirm: ({ key, body }) => request('POST', '/api/bookings', { body, headers: { 'idempotency-key': key } }),
   bookings: (status) => get('/api/bookings', { status }),
+  booking: (id) => get(`/api/bookings/${id}`),
   cancel: async (id) => (await request('POST', `/api/bookings/${id}/cancel`, { body: {} })).data,
 
   contended: () => get('/api/inventory/contended', { limit: 30 }),

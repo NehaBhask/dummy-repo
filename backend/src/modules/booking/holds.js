@@ -174,7 +174,7 @@ async function reserve({ userId, items, keys, probe, idempotencyKey, ttl }) {
 }
 
 // Same algorithm as the JS transaction above, executed inside Postgres in a single round trip
-// (see sql/002_create_holds_function.sql). Outcomes that need a replay lookup run after the
+// (see data-model/migrations/002_create_holds_function.sql). Outcomes that need a replay lookup run after the
 // statement has finished, i.e. with the row lock already released.
 async function createViaFunction({ userId, items, keys, probe, idempotencyKey, ttl }) {
   const args = [

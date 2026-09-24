@@ -10,9 +10,9 @@ zero oversell.
 ```bash
 docker compose up -d                 # repo root: Postgres on :5433 (already loaded with the seed)
 cd backend && npm install
-npm run migrate                      # additive tables/columns only (sql/001_additions.sql), idempotent
-npm start                            # http://localhost:3000   (cp .env.example .env to configure)
-npm test                             # 41 tests against the real Postgres (see "Testing")
+npm run migrate                      # additive tables/columns only (data-model/migrations/001_additions.sql), idempotent
+npm start                            # http://localhost:3000   (cp ../.env.example .env to configure)
+npm test                             # 48 tests (in ../tests/) against the real Postgres — see "Testing"
 npm run invariants                   # the correctness queries; exit code 1 if any fail
 npm run loadtest -- --requests 500   # race 500 requests at a scarce row; run while `npm start` is up
 ```
@@ -29,7 +29,7 @@ npm run build:web     # installs and builds ../frontend into ../frontend/dist (r
 npm start             # http://localhost:3000  → the app; /api/* → the API
 ```
 
-Screens: **Search** (AI bar in English/Hindi + filters), **My trip** (live hold countdowns, add a flight,
+Screens (routed, e.g. `/hotel/:id`, `/hold`, `/confirmation/:id`, `/visualizer`; see `../frontend/README.md`): **Home + Search** (AI bar in English/Hindi + filters), **Hold & pay** (live hold countdowns, add a flight,
 confirm & pay, retry-the-same-request, rollback view), **My bookings** (status filters, cancel), **Load test**
 (live chart, verdict, database-contention evidence). For UI development run `npm run dev` in `../frontend`
 (port 5173, proxies `/api` to :3000). See `../frontend/README.md`.
@@ -107,6 +107,20 @@ fails clearly instead of running if an explicitly-given `--inventory`/`--runs` c
 node scripts/simulate-network-retry.mjs --runs 8 --abort-ms 5                          # local
 gh workflow run network-retry-test.yml -f base_url=https://your-url -f runs=8          # via GitHub Actions
 ```
+
+### The mixed confirm / abandoned-hold scenario (`npm run loadtest:mixed`)
+
+A second load-test scenario, on top of the pure race: a crowd races for one row, a share of the winners **confirm and pay**, and the rest **abandon their hold** and let it expire past its TTL. It then asserts the closing balance and prints PASS/FAIL with the numbers.
+
+```bash
+npm start                                   # one terminal (expiry worker on, the default)
+npm run loadtest:mixed                      # another; ~35 s (8 s TTL + up to one 30 s sweep)
+npm run loadtest:mixed -- --requests 100 --confirm-share 0.3 --ttl 10   # options
+```
+
+Asserted for the row: `booked + held + available == total`; booked/held/available also equal the figures derived independently from the individual hold records (`GET /api/holds/:id`), not from the row's own counters; no hold is still `active` past its deadline and `held_units` is back to its baseline (no stock leaked by expired holds); a late confirm on an expired hold is refused; zero oversell was sampled (~20 ms) throughout the run and `/api/invariants` is clean. Exit code 0 = PASS, 1 = FAIL.
+
+Not vacuous: with the expiry sweep switched off (`EXPIRY_WORKER=off` on every server sharing the database) the same run FAILS on "no expired hold still holds stock" (10 holds active past their deadline, stock not returned). It runs on confirm + TTL expiry only; cancellation is used afterwards purely to put the test data back (skip with `--keep`).
 
 ### An industry-tool run (k6)
 
@@ -196,7 +210,7 @@ What each optimisation measured (same 500-race on one hot row, warm server, all 
   Postgres) and is cleared the instant this process frees units. Cost: units freed by *another* process can
   be invisible here for up to 300 ms. Gain on this rig is small (~9%); the point is that a sold-out row now
   costs the database one call instead of one per request, which matters for a shared/remote database.
-- **Postgres function** (`HOLD_IMPL=sql`, `sql/002_create_holds_function.sql`): lock, check, insert, update
+- **Postgres function** (`HOLD_IMPL=sql`, `data-model/migrations/002_create_holds_function.sql`): lock, check, insert, update
   in one round trip. No measurable change locally (round trip 1.6 ms); the benefit is for a remote database,
   where the lock is no longer held across network round trips (reasoning, not measured).
 
@@ -207,7 +221,7 @@ region, with the generator on a separate machine. Numbers from this rig are a lo
 
 | Requirement | Mechanism | Where |
 |---|---|---|
-| No oversell | `SELECT … FOR UPDATE` on every inventory row, then check, then update, atomically (Postgres function `kognivera_create_holds`, or the equivalent Node txn with `HOLD_IMPL=js`); DB `CHECK` as safety net | `holds.js`, `sql/002_create_holds_function.sql` |
+| No oversell | `SELECT … FOR UPDATE` on every inventory row, then check, then update, atomically (Postgres function `kognivera_create_holds`, or the equivalent Node txn with `HOLD_IMPL=js`); DB `CHECK` as safety net | `holds.js`, `data-model/migrations/002_create_holds_function.sql` |
 | No deadlock | rows always locked in ascending `inventory_id` (`lockInventory`); holds → inventory order everywhere; saga steps are single-row txns | `db.js` |
 | Idempotent holds | per-row key `<client key>#<i>`; `INSERT … ON CONFLICT DO NOTHING`; same key + different body → `422 idempotency_conflict` | `holds.js` |
 | Idempotent bookings | `INSERT booking(pending) … ON CONFLICT (idempotency_key) DO NOTHING` decides who owns the saga; retries get the stored outcome (`409 request_in_progress` while it runs) | `bookings.js` |
@@ -245,7 +259,7 @@ Demo saga failure: hold a room and a flight, then `POST /api/bookings` with `"si
 
 ## Testing
 
-`npm test` runs against the real Postgres, because the guarantees under test are Postgres' row locks.
+`npm test` runs the suites in `../tests/` (index: `../tests/README.md`) against the real Postgres, because the guarantees under test are Postgres' row locks.
 Fixtures are `inventory_calendar` rows dated 2031+ (seed covers Sep–Nov 2026) and are deleted afterwards;
 seed data is never modified by tests. Covered: 200-way and multi-unit races, simultaneous retries, key reuse,
 atomic multi-night holds, opposite-order deadlock check, expiry, confirm/replay, all three saga failure modes,
@@ -275,4 +289,4 @@ load-test engine (api/direct/duplicate keys), and NL parsing.
 - There is no "Goa" city (it's **Panaji**); the NL parser maps common names (Goa, Bangalore, Delhi, …).
 - The expiry worker's first run releases the seed's 115 already-expired `active` holds (their deadlines are in August). Counters stay consistent (`npm run invariants`).
 - Flight prices are per seat; flight inventory is one row per fare per departure date.
-- Load-test holds are kept as `released` rows (R8) with `loadtest_` keys, which `validate_postgres.py` already exempts. To reset everything: `python load_data.py --truncate`.
+- Load-test holds are kept as `released` rows (R8) with `loadtest_` keys, which `data-model/tools/validate_postgres.py` already exempts. To reset everything: `python data-model/tools/load_data.py --csv-dir data-model/seed/csv --truncate`.

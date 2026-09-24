@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 
-// R2: opaque prefixed ids. Prefixes match data/enums.json (hld, bkg, bit, pay, inv) plus
+// R2: opaque prefixed ids. Prefixes match data-model/enums.json (hld, bkg, bit, pay, inv) plus
 // the additive tables (ltr, ltrs, slg).
 export const newId = (prefix) => `${prefix}_${randomBytes(6).toString('hex')}`;
 

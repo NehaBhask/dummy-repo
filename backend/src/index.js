@@ -1,6 +1,8 @@
 import { config } from './config.js';
 import { startServer, shutdown } from './server.js';
+import { seedDemoQueries } from '../../ai/search.js';
 
+seedDemoQueries();
 const handle = await startServer();
 console.log(
   `kognivera backend listening on ${handle.baseUrl}  (db pool max ${config.poolMax}, ` +

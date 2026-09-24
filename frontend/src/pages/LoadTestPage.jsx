@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Flame } from 'lucide-react';
 import { api } from '../api.js';
 import { useApp } from '../context.jsx';
 import { useI18n } from '../i18n.jsx';
@@ -88,7 +89,7 @@ export default function LoadTestPage() {
   const replays = done ? Math.max(0, p.success - run.summary.successes) : 0;
 
   return (
-    <div className="page">
+    <div className="container wide page loadtest">
       <h1>{t('lt.title')}</h1>
       <p className="lead">{t('lt.lead')}</p>
       <ErrorBanner error={error} />
@@ -143,7 +144,7 @@ export default function LoadTestPage() {
             <span>{t('lt.bypass')}</span>
           </label>
           <button className="btn primary fire" disabled={running || !target} onClick={fire}>
-            {running ? <Spinner label={t('lt.running')} /> : `🔥 ${t('lt.fire', { n: num(cfg.requests * cfg.dup) })}`}
+            {running ? <Spinner label={t('lt.running')} /> : <><Flame size={16} /> {t('lt.fire', { n: num(cfg.requests * cfg.dup) })}</>}
           </button>
         </div>
       </section>

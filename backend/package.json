@@ -15,7 +15,8 @@
     "migrate": "node scripts/migrate.js",
     "invariants": "node scripts/invariants.js",
     "loadtest": "node scripts/loadtest.js",
-    "test": "node --test --test-concurrency=1 \"test/*.test.js\""
+    "loadtest:mixed": "node scripts/mixed-loadtest.mjs",
+    "test": "node --test --test-concurrency=1 \"../tests/*.test.js\""
   },
   "dependencies": {
     "cors": "^2.8.6",

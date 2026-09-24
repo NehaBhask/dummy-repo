@@ -59,6 +59,8 @@ export function I18nProvider({ children }) {
         new Intl.DateTimeFormat(locale, { ...opts, timeZone: 'UTC' }).format(new Date(`${String(iso).slice(0, 10)}T00:00:00Z`)),
       dateTime: (iso) =>
         new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(iso)),
+      // Flight times are stored as UTC instants with no airport time zone, so they are shown as UTC clock times.
+      time: (iso) => new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' }).format(new Date(iso)),
       num: (n) => new Intl.NumberFormat(locale).format(n),
     };
   }, [lang, t]);

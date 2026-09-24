@@ -1,0 +1,17 @@
+# dependencies / builds
+node_modules/
+frontend/dist/
+dist/
+__pycache__/
+*.pyc
+
+# secrets — copy .env.example to backend/.env and fill in; never commit the real one
+.env
+.env.*
+!.env.example
+
+# local run output (load-test scratch, k6 logs, temp reports)
+backend/k6-run.*
+backend/result_*.json
+*.log
+.DS_Store

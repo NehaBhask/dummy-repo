@@ -13,7 +13,8 @@ const files = [];
   }
 })('src');
 
-const used = new Set(['nav.search', 'nav.trip', 'nav.bookings', 'nav.loadtest']);
+// keys reached through expressions the regex below cannot see (t(cond ? 'a' : 'b'), t(LABEL[x]))
+const used = new Set(['nav.explore', 'nav.trip', 'nav.bookings', 'nav.visualizer', 'nav.loadtest', 'viz.race', 'viz.saga', 'viz.retry', 'bookings.emptyUpcoming', 'bookings.emptyPast', 'search.count1', 'search.flightCount1']);
 for (const f of files) {
   const s = readFileSync(f, 'utf8');
   for (const m of s.matchAll(/\bt\('([^']+)'/g)) used.add(m[1]);
@@ -35,6 +36,7 @@ const dynamic = {
   cabin: ['economy','premium_economy','business','first'],
   pref: ['breakfast','refundable'],
   'lt.inv': ['oversold','negative','held_drift','booked_drift'],
+  'pay.err': ['number','name','expiry','cvv','upi'],
 };
 for (const [p, vals] of Object.entries(dynamic)) for (const v of vals) for (const [n, d] of [['en', en], ['hi', hi]]) if (!(`${p}.${v}` in d)) problems.push(`missing in ${n}: ${p}.${v}`);
 console.log(`${used.size} static keys used, ${Object.keys(en).length} en / ${Object.keys(hi).length} hi entries`);

@@ -1,13 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { api } from './api.js';
 
-// App-wide state: server-provided config, chosen currency, hash routing and toasts.
+// App-wide state: server-provided config, chosen currency and toasts. Routing lives in router.jsx.
 const AppCtx = createContext(null);
-const ROUTES = ['search', 'trip', 'bookings', 'loadtest'];
-const parseHash = () => {
-  const r = window.location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
-  return ROUTES.includes(r) ? r : 'search';
-};
 
 export function AppProvider({ children }) {
   const [meta, setMeta] = useState(null);
@@ -20,14 +15,7 @@ export function AppProvider({ children }) {
       return null;
     }
   });
-  const [route, setRoute] = useState(parseHash);
   const [toasts, setToasts] = useState([]);
-
-  useEffect(() => {
-    const onHash = () => setRoute(parseHash());
-    window.addEventListener('hashchange', onHash);
-    return () => window.removeEventListener('hashchange', onHash);
-  }, []);
 
   useEffect(() => {
     Promise.all([api.meta(), api.currencies()])
@@ -36,11 +24,6 @@ export function AppProvider({ children }) {
         setCurrencies(c.currencies);
       })
       .catch((e) => setBootError(e));
-  }, []);
-
-  const navigate = useCallback((r) => {
-    window.location.hash = `/${r}`;
-    window.scrollTo({ top: 0 });
   }, []);
 
   const setCurrency = useCallback((c) => {
@@ -65,13 +48,11 @@ export function AppProvider({ children }) {
       bootError,
       currency: currency ?? meta?.user?.home_currency ?? 'INR',
       setCurrency,
-      route,
-      navigate,
       toast,
       toasts,
       dismissToast: (id) => setToasts((t) => t.filter((x) => x.id !== id)),
     }),
-    [meta, currencies, bootError, currency, setCurrency, route, navigate, toast, toasts],
+    [meta, currencies, bootError, currency, setCurrency, toast, toasts],
   );
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
 }
