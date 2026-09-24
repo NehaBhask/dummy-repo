@@ -8,18 +8,30 @@ import {
   aiSearchBody, bookingBody, cancelBody, flightQuery, holdBody, hotelQuery, idempotencyKey, loadTestBody, parse,
 } from './validation.js';
 import { demoUser } from './modules/users.js';
+import { listPersonas, operatorOnly } from './modules/session.js';
+import { opsSummary, recordRejection, resetDemo } from './modules/ops.js';
 import { checkInvariants } from './modules/invariants.js';
 import { getInventory, resolveHoldItems } from './modules/inventory/availability.js';
-import { findContendedInventory, searchFlights, searchHotels } from './modules/inventory/search.js';
+import { findContendedInventory, flightRoutes, searchFlights, searchHotels } from './modules/inventory/search.js';
 import { createHold, getHold, releaseHold } from './modules/booking/holds.js';
 import { cancelBooking, confirmBooking, getBooking, listBookings } from './modules/booking/bookings.js';
-import { aiSearch } from '../../ai/search.js';
+import { aiFlightSearch, aiSearch } from '../../ai/search.js';
 import { getRun, listRuns, publicRun, runLoadTest, startLoadTest } from './modules/loadtest/engine.js';
 
 export function buildRouter({ worker } = {}) {
   const r = Router();
 
-  const userIdOf = async (body) => body.user_id ?? (await demoUser()).user_id;
+  // Who is acting. A signed-in traveller always acts as themselves (a body.user_id is ignored); the operator has
+  // no traveller identity, so traveller actions are refused; with no session the old demo-user fallback applies.
+  const actor = async (req, body = {}) => {
+    if (req.session?.role === 'operator') throw new AppError('forbidden');
+    return req.session?.user_id ?? body.user_id ?? (await demoUser()).user_id;
+  };
+  // Whose records may be read: the signed-in traveller's own; anonymous callers keep the ?user_id= behaviour.
+  const viewer = (req) => {
+    if (req.session?.role === 'operator') throw new AppError('forbidden');
+    return req.session?.user_id ?? req.query.user_id;
+  };
   const keyOf = (req, body) => {
     const raw = req.get('idempotency-key') ?? body.idempotency_key;
     if (!raw) {
@@ -41,8 +53,14 @@ export function buildRouter({ worker } = {}) {
   r.get('/metrics', (_req, res) => res.json({ safety_net_hits: metrics.safetyNetHits, sold_out_shield: config.fastReject && config.soldOutCacheMs > 0 }));
   r.get('/demo-user', async (_req, res) => res.json(await demoUser()));
 
+  /* ------------------------ mock login & operations ------------------------ */
+  // The 10 demo travellers for the login dropdown (public: it is the way in).
+  r.get('/personas', async (_req, res) => res.json({ personas: await listPersonas(), operator: { user_id: 'operator', display_name: 'Operations' } }));
+  r.get('/ops/summary', operatorOnly, async (req, res) => res.json(await opsSummary({ inventoryId: req.query.inventory_id ?? null })));
+  r.post('/ops/reset-demo', operatorOnly, async (_req, res) => res.json(await resetDemo()));
+
   // Everything the UI needs to configure itself in one call.
-  r.get('/meta', async (_req, res) => {
+  r.get('/meta', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT min(for_date)::text AS from_date, max(for_date)::text AS to_date, CURRENT_DATE::text AS today
          FROM inventory_calendar`,
@@ -54,7 +72,8 @@ export function buildRouter({ worker } = {}) {
       today: w.today,
       inventory_window: { from: w.from_date, to: w.to_date },
       default_check_in: dflt,
-      user: await demoUser(),
+      user: req.session ?? (await demoUser()),
+      role: req.session?.role ?? null,
       ai_search: { enabled: Boolean(config.gemini.apiKey), fallback: 'english-only heuristic' },
       demo_controls: config.faultInjection, // fault injection + short hold TTLs are offered only outside production
       hold_ttl_seconds: config.holdTtlSeconds,
@@ -86,26 +105,7 @@ export function buildRouter({ worker } = {}) {
 
   // Origin → destination pairs that have flight seats, with the departure dates that have any.
   r.get('/flights/routes', async (req, res) => {
-    const { rows } = await pool.query(
-      `SELECT oc.name AS origin, dc.name AS destination,
-              array_agg(DISTINCT ic.for_date::text ORDER BY ic.for_date::text) AS dates
-         FROM inventory_calendar ic
-         JOIN flight_fares ff ON ff.fare_id = ic.entity_id
-         JOIN flights f ON f.flight_id = ff.flight_id
-         JOIN airports oa ON oa.airport_id = f.origin_airport_id
-         JOIN cities oc ON oc.city_id = oa.city_id
-         JOIN airports da ON da.airport_id = f.dest_airport_id
-         JOIN cities dc ON dc.city_id = da.city_id
-        WHERE ic.entity_type = 'flight_fare' AND ic.for_date >= CURRENT_DATE
-          AND ic.total_units - ic.booked_units - ic.held_units >= 1
-          AND ($1::text IS NULL OR lower(dc.name) = lower($1))
-          AND ($2::text IS NULL OR lower(oc.name) = lower($2))
-        GROUP BY oc.name, dc.name
-        ORDER BY count(DISTINCT ic.for_date) DESC, oc.name, dc.name
-        LIMIT 80`,
-      [req.query.destination ?? null, req.query.origin ?? null],
-    );
-    res.json({ routes: rows });
+    res.json({ routes: await flightRoutes({ origin: req.query.origin ?? null, destination: req.query.destination ?? null }) });
   });
 
   r.get('/currencies', async (_req, res) => {
@@ -132,7 +132,10 @@ export function buildRouter({ worker } = {}) {
   /* ------------------------------ search ------------------------------ */
   r.get('/search/hotels', async (req, res) => res.json(await searchHotels(parse(hotelQuery, req.query))));
   r.get('/search/flights', async (req, res) => res.json(await searchFlights(parse(flightQuery, req.query))));
-  r.post('/search/ai', async (req, res) => res.json(await aiSearch(parse(aiSearchBody, req.body))));
+  r.post('/search/ai', async (req, res) => {
+    const { kind, ...b } = parse(aiSearchBody, req.body);
+    res.json(kind === 'flights' ? await aiFlightSearch(b) : await aiSearch(b));
+  });
 
   /* ------------------------------ holds ------------------------------- */
   r.post('/holds', async (req, res) => {
@@ -141,7 +144,18 @@ export function buildRouter({ worker } = {}) {
     const items = await resolveHoldItems(b.items);
     // Load tests send X-Bypass-Shield: 1 so every request hits Postgres' row lock (dev/demo only).
     const bypassShield = config.faultInjection && req.get('x-bypass-shield') === '1';
-    const out = await createHold({ userId: await userIdOf(b), items, idempotencyKey: key, ttlSeconds: b.ttl_seconds, bypassShield });
+    const userId = await actor(req, b);
+    let out;
+    try {
+      out = await createHold({ userId, items, idempotencyKey: key, ttlSeconds: b.ttl_seconds, bypassShield });
+    } catch (err) {
+      // a rejected attempt leaves no row (the transaction rolls back), so the ops feed keeps a short in-memory record
+      if (err instanceof AppError && err.code === 'sold_out') {
+        const me = req.session ?? (await demoUser());
+        recordRejection({ user: { user_id: me.user_id, display_name: me.display_name }, inventory_id: err.details?.inventory_id ?? null, units: items[0]?.units, code: 'sold_out' });
+      }
+      throw err;
+    }
     replayHeader(res, out.replayed)
       .status(out.replayed ? 200 : 201)
       .json({
@@ -150,16 +164,16 @@ export function buildRouter({ worker } = {}) {
         holds: out.holds,
       });
   });
-  r.get('/holds/:id', async (req, res) => res.json(await getHold(req.params.id, { userId: req.query.user_id })));
+  r.get('/holds/:id', async (req, res) => res.json(await getHold(req.params.id, { userId: viewer(req) })));
   r.post('/holds/:id/release', async (req, res) => {
-    res.json(await releaseHold({ holdId: req.params.id, userId: req.body?.user_id }));
+    res.json(await releaseHold({ holdId: req.params.id, userId: req.session ? await actor(req, req.body ?? {}) : req.body?.user_id }));
   });
 
   /* ----------------------------- bookings ----------------------------- */
   r.post('/bookings', async (req, res) => {
     const b = parse(bookingBody, req.body);
     const out = await confirmBooking({
-      userId: await userIdOf(b),
+      userId: await actor(req, b),
       idempotencyKey: keyOf(req, b),
       items: b.items ?? b.hold_ids.map((hold_id) => ({ hold_id })),
       currency: b.currency,
@@ -193,13 +207,13 @@ export function buildRouter({ worker } = {}) {
   });
 
   r.get('/bookings', async (req, res) => {
-    const userId = req.query.user_id ?? (await demoUser()).user_id;
+    const userId = viewer(req) ?? (await demoUser()).user_id;
     res.json({ bookings: await listBookings({ userId, status: req.query.status, limit: Math.min(Number(req.query.limit) || 50, 200) }) });
   });
-  r.get('/bookings/:id', async (req, res) => res.json(await getBooking(req.params.id, { userId: req.query.user_id })));
+  r.get('/bookings/:id', async (req, res) => res.json(await getBooking(req.params.id, { userId: viewer(req) })));
   r.post('/bookings/:id/cancel', async (req, res) => {
     const b = parse(cancelBody, req.body ?? {});
-    const out = await cancelBooking({ bookingId: req.params.id, userId: b.user_id, reason: b.reason });
+    const out = await cancelBooking({ bookingId: req.params.id, userId: req.session ? await actor(req, b) : b.user_id, reason: b.reason });
     res.json({ already_cancelled: out.already, restocked_units: out.restocked_units ?? 0, booking: out.booking });
   });
 

@@ -12,7 +12,7 @@ docker compose up -d                 # repo root: Postgres on :5433 (already loa
 cd backend && npm install
 npm run migrate                      # additive tables/columns only (data-model/migrations/001_additions.sql), idempotent
 npm start                            # http://localhost:3000   (cp ../.env.example .env to configure)
-npm test                             # 48 tests (in ../tests/) against the real Postgres — see "Testing"
+npm test                             # 56 tests (in ../tests/) against the real Postgres — see "Testing"
 npm run invariants                   # the correctness queries; exit code 1 if any fail
 npm run loadtest -- --requests 500   # race 500 requests at a scarce row; run while `npm start` is up
 ```

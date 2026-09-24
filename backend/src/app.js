@@ -8,6 +8,7 @@ import { ZodError } from 'zod';
 import { config } from './config.js';
 import { AppError, fromPgError, localise, pickLang } from './errors.js';
 import { buildRouter } from './routes.js';
+import { attachSession } from './modules/session.js';
 
 export function createApp({ worker } = {}) {
   const app = express();
@@ -22,7 +23,7 @@ export function createApp({ worker } = {}) {
   });
 
   const router = buildRouter({ worker });
-  app.use('/api', router);
+  app.use('/api', attachSession, router);
   app.get('/health', (_req, res) => res.redirect(307, '/api/health'));
 
   // Serve the built web app (frontend/dist) from the same server, so `npm start` is the whole product.

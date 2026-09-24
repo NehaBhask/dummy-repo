@@ -12,6 +12,16 @@ const CATALOGUE = {
     en: 'The requested record does not exist.',
     hi: 'अनुरोधित रिकॉर्ड नहीं मिला।',
   },
+  login_required: {
+    status: 401,
+    en: 'Please sign in to continue.',
+    hi: 'जारी रखने के लिए कृपया साइन इन करें।',
+  },
+  invalid_session: {
+    status: 401,
+    en: 'Your session is not valid. Please sign in again.',
+    hi: 'आपका सत्र मान्य नहीं है। कृपया फिर से साइन इन करें।',
+  },
   forbidden: {
     status: 403,
     en: 'You do not have access to this resource.',

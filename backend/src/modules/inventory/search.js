@@ -52,7 +52,7 @@ export async function searchHotels(q) {
   const fx = await fxContext();
   if (q.currency) assertCurrency(fx, q.currency);
 
-  const { rows } = await pool.query(HOTEL_SQL, [q.city, q.check_in, nights, q.min_stars ?? 0, rooms]);
+  const { rows } = await pool.query(HOTEL_SQL, [q.city, q.check_in, nights, q.min_stars ?? 0, q.include_sold_out ? 0 : rooms]);
   const planRows = rows.length
     ? (await pool.query(PLAN_SQL, [rows.map((r) => r.room_type_id)])).rows
     : [];
@@ -139,7 +139,8 @@ export async function searchHotels(q) {
 
   const list = [...cards.values()];
   for (const c of list) {
-    c.rooms.sort((a, b) => a._cmp.cmp(b._cmp));
+    // fully booked room types stay listed (so they can be shown as such) but sort after the bookable ones
+    c.rooms.sort((a, b) => (a.available_units <= 0) - (b.available_units <= 0) || a._cmp.cmp(b._cmp));
     c.from_price = c.rooms[0].from_price;
     c._cmp = c.rooms[0]._cmp;
   }
@@ -235,16 +236,41 @@ export async function findContendedInventory(limit = 20) {
   const { rows } = await pool.query(
     `SELECT ic.inventory_id, ic.for_date::text AS for_date, ic.total_units, ic.booked_units, ic.held_units,
             (ic.total_units - ic.booked_units - ic.held_units)::int AS free_units,
-            ic.price::text AS price, ic.currency, h.name AS hotel, rt.name AS room_type
+            ic.price::text AS price, ic.currency, h.name AS hotel, h.hotel_id, c.name AS city, rt.name AS room_type
        FROM inventory_calendar ic
        JOIN hotel_room_types rt ON rt.room_type_id = ic.entity_id AND ic.entity_type = 'room_type'
        JOIN hotels h ON h.hotel_id = rt.hotel_id
+       JOIN cities c ON c.city_id = h.city_id
       WHERE ic.total_units <= 4
         AND ic.total_units - ic.booked_units - ic.held_units BETWEEN 1 AND 3
         AND ic.for_date >= CURRENT_DATE
       ORDER BY (ic.total_units - ic.booked_units - ic.held_units), ic.for_date
       LIMIT $1`,
     [limit],
+  );
+  return rows;
+}
+
+/** Routes that still have a free seat on some date: [{origin, destination, dates[]}]. Either end may be omitted. */
+export async function flightRoutes({ origin = null, destination = null } = {}) {
+  const { rows } = await pool.query(
+    `SELECT oc.name AS origin, dc.name AS destination,
+            array_agg(DISTINCT ic.for_date::text ORDER BY ic.for_date::text) AS dates
+       FROM inventory_calendar ic
+       JOIN flight_fares ff ON ff.fare_id = ic.entity_id
+       JOIN flights f ON f.flight_id = ff.flight_id
+       JOIN airports oa ON oa.airport_id = f.origin_airport_id
+       JOIN cities oc ON oc.city_id = oa.city_id
+       JOIN airports da ON da.airport_id = f.dest_airport_id
+       JOIN cities dc ON dc.city_id = da.city_id
+      WHERE ic.entity_type = 'flight_fare' AND ic.for_date >= CURRENT_DATE
+        AND ic.total_units - ic.booked_units - ic.held_units >= 1
+        AND ($1::text IS NULL OR lower(dc.name) = lower($1))
+        AND ($2::text IS NULL OR lower(oc.name) = lower($2))
+      GROUP BY oc.name, dc.name
+      ORDER BY count(DISTINCT ic.for_date) DESC, oc.name, dc.name
+      LIMIT 80`,
+    [destination, origin],
   );
   return rows;
 }
