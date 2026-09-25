@@ -316,7 +316,7 @@ The terminal outcome is a confirmed booking that survives concurrency, retries a
 - **Assistant.** Open the chat bubble on Explore: *"find the cheapest hotel in Jaipur for 1 night from 6 October"* → *"yes, reserve it"* (it holds the room and quotes the total with tax) → *"yes, pay with card"* → **View booking**. On a hotel page ask *"which rooms are free here?"*; on My bookings, *"cancel that booking"*.
 - **Abandoned reservation.** In **Demo controls** set the hold time to 15 s. User A reserves the last room; user B (who already has it in their trip) is refused while A's timer runs. When it ends, the hold expires, the stock returns, and B can reserve it. The Operations dashboard shows the hold go from Active to Expired with 0 violations. `npm run loadtest:mixed` does the same at scale.
 - **One-stop flights.** Flights → From Bengaluru, To Jaipur, 5 Oct → **One-stop options** (via New Delhi), from the form or from AI search. Both legs are held in one atomic request, so a sold-out second leg leaves nothing held.
-- **Many users at once.** `k6 run -e VUS=200 scripts/k6-loadtest.js` (from `backend/`) sends every request as a different traveller (`X-User-Id`); the backend log shows `user=…` for each.
+- **Many users at once.** `k6 run -e VUS=200 scripts/k6-loadtest.js` (from `backend/`) sends every request as a different traveller (`X-User-Id`); the backend log shows `user=…` for each. Options and expected output: the k6 section in section 8.
 
 ---
 
@@ -362,13 +362,52 @@ Each run checks six things against the **database**, never the responses:
 
 Measured on the dev machine: **3 granted · 497 sold_out · 0 errors, all PASS**. The result is the same at 1,000 requests.
 
+### k6 load test (many different users)
+
+[k6](https://k6.io) races a crowd at one scarce room from outside the app. `backend/scripts/k6-loadtest.js` sends **every request as a different traveller**:
+`setup()` reads the scarcest room and the active user ids (`GET /api/users/ids`), builds a `{request number → user id}` dictionary, and each request sets that
+user in the `X-User-Id` header. The verdict is not k6's own counts: `teardown()` reads the **database** (`/api/invariants` and the row) and `check()`s it.
+
+```bash
+winget install --id GrafanaLabs.k6 -e                              # one-time (or see k6.io)
+cd backend                                                         # with the API running: npm start
+k6 run -e VUS=200 scripts/k6-loadtest.js                           # 200 users, one instant burst, raw row lock
+k6 run -e VUS=500 -e BYPASS_SHIELD=false scripts/k6-loadtest.js    # production path: the sold-out shield stays on
+k6 run -e VUS=500 -e RAMP_SECONDS=10 scripts/k6-loadtest.js        # the same 500 requests spread over 10 s (enough data for a graph)
+```
+
+| Option (`-e NAME=value`) | Default | Meaning |
+|---|---|---|
+| `VUS` | 200 | Virtual users = requests in the race. |
+| `BASE_URL` | `http://localhost:3000` | Target server (a tunnel or a deployed URL works). |
+| `INVENTORY_ID` | scarcest row | Race a specific room or seat row. |
+| `BYPASS_SHIELD` | `true` | `true`: every request goes straight to the Postgres row lock. `false`: the production path with the in-memory sold-out shield. |
+| `RAMP_SECONDS` | 0 | `0`: all users fire in one instant. `>0`: spread evenly over that many seconds. |
+| `SINGLE_USER` | `false` | `true`: send no user header (the old single-user behaviour). |
+
+**What a passing run looks like** (200 users, a room with 1 unit free): `user map: 200 request slots -> 200 distinct users`, then `holds_granted 1` and
+`holds_sold_out 199` with `holds_other_error 0`, and all checks ✓: no oversold rows anywhere in the database, no negative counters, `held_units` equals the
+sum of active holds, `booked_units` equals the confirmed items, and this run never consumed more than the units that were free. k6 reports
+`http_req_failed` near 100% in this test: it counts every 409 as a failure, but a sold-out reply is the correct answer here. Watch `holds_other_error` (must be 0).
+
+**Prove the requests came from different users.** The backend logs the user on every request line (`user=<X-User-Id>`). With the server output saved to a file
+(`npm start > be.log 2>&1`), count the distinct users that sent a hold:
+
+```bash
+grep "POST /api/holds" be.log | grep -o "user=.*" | sort -u | wc -l     # equals VUS
+```
+
+The Operations dashboard shows the same thing: its activity feed lists the winner and the rejected users by name.
+Graph and report: `K6_WEB_DASHBOARD=true K6_WEB_DASHBOARD_EXPORT=race-report.html k6 run -e VUS=500 -e RAMP_SECONDS=10 scripts/k6-loadtest.js`;
+a ramping read-only run for a genuine load curve is `scripts/k6-report-demo.js`, and its saved report is [`docs/evidence/k6-report.html`](docs/evidence/k6-report.html).
+
 ### More proofs
 
 | Proof | Run |
 |-------|-----|
 | In-app race with a live chart and verdict | **Load test** page · `POST /api/loadtests` |
 | Mixed confirm / abandoned-hold closing balance (fails if the expiry sweep is off) | `npm run loadtest:mixed` |
-| k6 with a **different user on every request**, and `teardown()` checking `/api/invariants` | `k6 run -e VUS=200 scripts/k6-loadtest.js` (from `backend/`; `-e SINGLE_USER=true` for the old single-user run) |
+| k6 with a **different user on every request**, and `teardown()` checking `/api/invariants` (see the k6 section above) | `k6 run -e VUS=200 scripts/k6-loadtest.js` (from `backend/`) |
 | Idempotency after a dropped response | `node scripts/simulate-network-retry.mjs --runs 8 --abort-ms 5` |
 | From **separate machines** (GitHub Actions; needs a public URL) | `gh workflow run distributed-load-test.yml` · `distributed-idempotency-test.yml` · `network-retry-test.yml` |
 | Schema conformance | `python data-model/tools/validate_postgres.py --csv-dir data-model/seed/csv --conformance-script data-model/tools/validate_conformance.py` |

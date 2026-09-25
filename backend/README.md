@@ -139,6 +139,8 @@ winget install --id GrafanaLabs.k6 -e                    # one-time
 k6 run scripts/k6-loadtest.js                             # 200 VUs at an auto-picked scarce row, localhost:3000
 k6 run -e BASE_URL=https://your-url -e VUS=500 scripts/k6-loadtest.js
 k6 run -e VUS=500 -e BYPASS_SHIELD=false scripts/k6-loadtest.js   # production path (shield stays on)
+k6 run -e VUS=500 -e RAMP_SECONDS=10 scripts/k6-loadtest.js        # spread over 10 s so k6 has data to graph
+k6 run -e VUS=200 -e SINGLE_USER=true scripts/k6-loadtest.js       # no user header (the demo-user fallback)
 ```
 
 Prints k6's own summary (granted/sold_out counts, latency percentiles) plus 5 `check()`s read straight from
