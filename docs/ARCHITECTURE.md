@@ -29,7 +29,7 @@ proven by a load test that shows zero oversell.
 | `backend/src/` | Express API. `routes.js` (HTTP contract) → `validation.js` (zod, strict) → `modules/` (`booking/holds.js`, `booking/bookings.js`, `inventory/*`, `payment/mock.js`, `loadtest/engine.js`, `invariants.js`) → `db.js` (pool, deadlock-retrying `withTx`, sorted `lockInventory`). `errors.js` = bilingual error catalogue + Postgres/pool error mapping. |
 | `ai/` | Natural-language search for hotels and flights. Gemini function-calling fills a `search_hotels` / `search_flights` schema (`prompts/`); the result feeds the **same** grounded SQL search as the form (`POST /api/search/ai`, `kind: "hotels" \| "flights"`). Heuristic + cache fallbacks. |
 | `data-model/` | Canonical schema, our additive migrations, seed CSVs, loaders and the conformance validator. See `DATA_MODEL.md`. |
-| `tests/` | 60 automated tests against real Postgres (concurrency races, idempotency, saga, expiry, cancel, HTTP contract, AI parsing). |
+| `tests/` | 66 automated tests (plus 16 Python tests for the assistant) against real Postgres (concurrency races, idempotency, saga, expiry, cancel, HTTP contract, AI parsing). |
 | `.github/workflows/` | Three GitHub Actions workflows that fire load from separate machines (see "Proof"). |
 
 ## How correctness is achieved
@@ -77,7 +77,7 @@ tried in turn, 6 s timeout each) → English heuristic parser. The response says
 | Genuinely separate machines | `.github/workflows/distributed-load-test.yml` · `distributed-idempotency-test.yml` |
 | Idempotency under a dropped response | `backend/scripts/simulate-network-retry.mjs` · `network-retry-test.yml` |
 | Data invariants at any moment | `GET /api/invariants` · `npm run invariants` |
-| Automated tests | `npm test` (in `backend/`) — 60 tests |
+| Automated tests | `npm test` (in `backend/`) — 66 tests |
 
 Details and measured numbers: `backend/README.md`.
 
@@ -90,6 +90,8 @@ Details and measured numbers: `backend/README.md`.
 | `GET /personas` | the 10 demo travellers for the login screen |
 | `GET /ops/summary` · `POST /ops/reset-demo` | operator only: holds, bookings, inventory, invariants, activity feed; undo the demo's own holds/bookings |
 | `GET /search/hotels` · `/search/flights` · `POST /search/ai` | availability search (form, and natural language) |
+| `GET /holds` | the signed-in traveller's live reservations, described and priced (`?currency=`); the trip page uses it to show holds made anywhere, including by the assistant |
+| `POST /chat` | booking assistant: session-checked proxy to the agent service (`agent/`), `503 assistant_unavailable` when it is down |
 | `GET /inventory/:id` · `/inventory/contended` | one row's counters · the scarce rows worth racing |
 | `POST /holds` · `GET /holds/:id` · `POST /holds/:id/release` | TTL hold (`Idempotency-Key` required) |
 | `POST /bookings` · `GET /bookings` · `GET /bookings/:id` · `POST /bookings/:id/cancel` | confirm + pay (saga), list, cancel + restock |
@@ -115,3 +117,34 @@ The browser sends `X-User-Id` (a seeded active user id, or `operator`); the serv
 ## One-stop flights
 
 `GET /search/flights` returns the direct `results` plus `connections`: pairs of flights where the second leaves the same airport the first landed at, 60 to 360 minutes later (`MIN_LAYOVER_MIN` / `MAX_LAYOVER_MIN` in `modules/inventory/search.js`), with enough free seats on both legs, cheapest first. It is one SQL self-join over the same `inventory_calendar` rows (no AI, no graph library); `connections=false` skips it, `connections_limit` caps it. Each connection carries `stays` (both legs), which the client sends in ONE `POST /holds`: the existing atomic hold locks both rows in order and gives them one deadline, so a connection can never be half-held or oversold, and the saga compensates both lines like any multi-item booking. `GET /flights/routes` also lists origin/destination pairs reachable with one stop. Limits: one stop only, layover must be at the same airport, and the provided flights carry no time zones, so times are compared as stored.
+
+## Booking assistant (MCP)
+
+```
+Browser chat widget ──POST /api/chat {message, history, page context}──▶ Express API   (session check, validation)
+                                                                            │  {message, context, user}
+                                                                            ▼
+                                                        agent/service.py  (FastAPI)
+                                                          LangChain agent · Gemini (same model + fallbacks as ai/search.js)
+                                                                            │  MultiServerMCPClient, headers: X-User-Id, X-Turn-Id
+                                                                            ▼
+                                                        agent/mcp_server.py  (FastMCP, streamable HTTP)
+                                                          read tools ──▶ Postgres (read-only connection, fixed queries)
+                                                          write tools ─▶ booking API  (atomic hold, idempotent booking, saga)
+```
+
+- **Why MCP:** the model gets one typed tool catalogue (`list_cities`, `search_hotels`, `get_hotel_rooms`, `search_flights`,
+  `get_my_bookings`, `get_booking`, `get_my_active_holds`, `reserve_trip`, `pay_and_confirm`, `release_holds`, `cancel_booking`) that any MCP client
+  could use, and the tools have one place to enforce rules.
+- **Reads vs writes:** reads are direct SQL (fast, no side effects, database refuses writes on that connection). Writes go through
+  the same HTTP endpoints as the website, so the guarantees this project is about (no oversell, idempotency, rollback) hold for chat too.
+- **Identity:** the Node API takes the signed-in user from the session and puts it in the MCP request header; tools read the user from
+  the header, never from arguments. A body `user_id` is ignored.
+- **Consent:** reserve, pay and cancel need `user_confirmed=true`; `pay_and_confirm` is refused when `reserve_trip` succeeded in the same
+  turn (`X-Turn-Id`), so payment always follows a separate message. Chat bookings are tagged `channel: agent`.
+- **Page context:** the widget sends page, URL parameters, hotel/booking id and a summary of the trip cart with every message; the system
+  prompt renders it as plain lines so "this hotel", "my trip" and "here" resolve.
+- **Failure:** a busy model falls back to the next one; if the chat service or tool server is down the API answers `503 assistant_unavailable`
+  and the rest of the site is unaffected.
+- **Limits:** the model can misread or misquote; prices it quotes come from tool results (room-only rate, plus 12% tax at payment); it does not
+  see the visible UI beyond the context snapshot; a reservation made in chat appears on the My trip page: the trip cart merges the traveller's live holds from `GET /holds` (polled every 5 s, and immediately after the assistant reserves, pays, releases or cancels), so it shows with its shared countdown and can be paid from either place.

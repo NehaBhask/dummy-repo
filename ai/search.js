@@ -391,13 +391,16 @@ export async function aiFlightSearch({ query, currency }) {
   const route = routes[0];
   const wanted = /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date ?? '')) ? raw.date : null;
   const date = wanted ?? route?.dates.find((d) => d >= today) ?? route?.dates[0] ?? today;
-  const found = route ? await searchFlights({ origin, destination, date, seats, currency }) : { results: [], total: 0, currency: currency ?? null, fx_rate_date: null };
+  // The same search the form uses: direct flights AND one-stop connections. (The AI only reads the request; what is
+  // returned always comes from the database, so a route that exists only with a stop is found here too.)
+  const found = route ? await searchFlights({ origin, destination, date, seats, currency }) : { results: [], connections: [], total: 0, currency: currency ?? null, fx_rate_date: null };
+  const connections = found.connections ?? [];
 
   await pool
     .query(
       `INSERT INTO search_logs (log_id, raw_query, language, parser, parsed_params, result_count, latency_ms, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
-      [newId('slg'), query, language, parser, JSON.stringify(raw), found.total ?? found.results.length, Date.now() - started],
+      [newId('slg'), query, language, parser, JSON.stringify(raw), (found.total ?? found.results.length) + connections.length, Date.now() - started],
     )
     .catch((err) => console.error('[ai] search_logs insert failed:', err.message));
 
@@ -409,7 +412,8 @@ export async function aiFlightSearch({ query, currency }) {
     fx_rate_date: found.fx_rate_date,
     total,
     results: found.results,
-    ...(total === 0 ? { no_results_reason: route ? 'no_flights_on_date' : 'no_route', available_dates: route?.dates.slice(0, 8) ?? [] } : {}),
+    connections,
+    ...(total === 0 && connections.length === 0 ? { no_results_reason: route ? 'no_flights_on_date' : 'no_route', available_dates: route?.dates.slice(0, 8) ?? [] } : {}),
   };
 }
 

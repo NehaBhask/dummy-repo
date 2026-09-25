@@ -47,6 +47,9 @@ export const config = {
         .split(',').map((m) => m.trim()).filter(Boolean),
     ],
   },
+  // The booking assistant (agent/): a Python service running a LangChain agent against a FastMCP tool server.
+  agentUrl: (process.env.AGENT_URL || 'http://127.0.0.1:8100').replace(/\/$/, ''),
+  agentTimeoutMs: int(process.env.AGENT_TIMEOUT_MS, 60_000),
   loadTestBaseUrl: process.env.LOADTEST_BASE_URL || null,
   corsOrigin: process.env.CORS_ORIGIN || '*',
 };

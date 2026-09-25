@@ -3,6 +3,8 @@ import { config } from '../../config.js';
 import { AppError } from '../../errors.js';
 import { newId } from '../../ids.js';
 import { describeInventory, inventoryTitle } from '../inventory/availability.js';
+import { D } from '../../money.js';
+import { assertCurrency, convert, fxContext, moneyOut } from '../../fx.js';
 import {
   clearSoldOut, enabled as soldOutEnabled, knownSoldOut, markSoldOut, withRowQueue,
 } from '../inventory/soldout.js';
@@ -229,6 +231,31 @@ async function createViaFunction({ userId, items, keys, probe, idempotencyKey, t
       throw new Error('idempotency race without a visible winner');
     }
   }
+}
+
+/**
+ * The traveller's own live reservations (status active, deadline not passed), each described well enough for the trip page
+ * to show it: what it is, when it stays and what it costs (in `currency`, default the row's own).
+ */
+export async function listActiveHolds({ userId, currency } = {}) {
+  const { rows } = await pool.query(
+    `SELECT ${COLS} FROM holds WHERE user_id = $1 AND status = 'active' AND expires_at > statement_timestamp() ORDER BY expires_at, created_at`,
+    [userId],
+  );
+  const inv = await describeInventory(rows.map((h) => h.inventory_id));
+  const fx = await fxContext();
+  if (currency) assertCurrency(fx, currency);
+  return rows.map((h) => {
+    const i = inv.get(h.inventory_id);
+    const out = currency ?? i?.currency;
+    const total = i ? convert(fx, D(i.price).mul(h.units).toFixed(2), i.currency, out) : null;
+    return {
+      ...h,
+      seconds_remaining: Math.max(0, Math.floor((new Date(h.expires_at) - Date.now()) / 1000)),
+      inventory: i ? { ...i, title: inventoryTitle(i) } : null,
+      price: total && moneyOut(fx, total, out),
+    };
+  });
 }
 
 export async function getHold(holdId, { userId } = {}) {

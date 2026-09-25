@@ -90,6 +90,16 @@ export const flightQuery = z.object({
   connections_limit: int(1, 30, 10),
 });
 
+export const chatBody = z.object({
+  message: z.string().trim().min(1).max(1000),
+  history: z
+    .array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(4000) }))
+    .max(20)
+    .default([]),
+  // What the traveller is looking at (page, filters, trip cart). Free-form but capped: it goes into the model prompt.
+  context: z.record(z.string(), z.unknown()).default({}).refine((c) => JSON.stringify(c).length <= 6000, 'context too large'),
+});
+
 export const aiSearchBody = z.object({
   query: z.string().min(3).max(500),
   currency: currency.optional(),

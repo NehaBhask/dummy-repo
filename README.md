@@ -32,7 +32,7 @@ double-book, and a failed multi-item booking rolls back cleanly. The invariant w
 
 ### Against the PS's MVP checklist
 
-- **Availability search with a TTL hold.** You can search hotels and flights with the form or in natural language (English/Hindi). Items go into **My trip**, where nothing is held yet. One **Reserve** then holds the whole trip atomically, with one server-clamped TTL (5 s – 30 min) and one live countdown.
+- **Availability search with a TTL hold.** You can search hotels and flights with the form, in natural language (English/Hindi), or by asking the chat assistant. Items go into **My trip**, where nothing is held yet. One **Reserve** then holds the whole trip atomically, with one server-clamped TTL (5 s – 30 min) and one live countdown.
 - **Confirm with payment; release on timeout.** `POST /api/bookings` captures a mock payment. A 30 s background sweep releases abandoned holds. A late confirm is refused at confirm time, whether or not the sweep has run.
 - **No overbooking under concurrent requests.** Every reservation is one transaction: `SELECT … FOR UPDATE` in ascending id order, check, then update, all inside a single Postgres function. The database `CHECK` is only a safety net, and the tests assert it **never fires**.
 - **Idempotent booking API.** Every write requires an `Idempotency-Key` and uses `INSERT … ON CONFLICT DO NOTHING`. A retry replays the original result. Reusing a key for a different request is refused.
@@ -44,15 +44,27 @@ double-book, and a failed multi-item booking rolls back cleanly. The invariant w
 | Area | What we built |
 |------|---------------|
 | **Concurrency** | The atomic reserve runs inside one Postgres function (`kognivera_create_holds`). An in-memory **sold-out shield** answers requests for full rows without touching the database lock. Deadlocks are retried. Overload (lock timeout, exhausted connection pool, database down) returns `503 + Retry-After`, never a bare 500. **Cluster mode** runs several processes. |
-| **Proof** | A 6-check verdict read from the database. A **duplicate-key** load mode. A sampled count of database sessions blocked on the row lock. A mixed confirm/abandon closing-balance test. k6. Three distributed GitHub Actions workflows. A dropped-response retry test. A **live System Visualizer**. 60 automated tests. |
-| **Product** | **Mock login** with 10 personas and an operator role. An **Operations dashboard**. A full **flight search UI**. A trip cart followed by one atomic Reserve. Demo controls for fault injection. A Card/UPI form. A **Retry the same request** button. |
+| **Proof** | A 6-check verdict read from the database. A **duplicate-key** load mode. A sampled count of database sessions blocked on the row lock. A mixed confirm/abandon closing-balance test. k6, with **every request sent as a different user**. Three distributed GitHub Actions workflows. A dropped-response retry test. A **live System Visualizer**. **66 Node tests + 16 Python tests** on real Postgres. |
+| **Product** | **Mock login** with 10 personas (one session per browser tab) and an operator role. An **Operations dashboard**: live holds, bookings, inventory counts, the invariant check, and who was rejected, with a **Reset demo** button. Hotel and flight search with English/Hindi UI. A **Rooms** field on Home and a rooms stepper on the hotel page, capped at what is free. Fully booked room categories stay listed as **"Already booked"** instead of vanishing. Search filters are pre-filled with what you searched (including for AI search). A trip cart followed by one atomic Reserve. Demo controls for fault injection. A Card/UPI form. A **Retry the same request** button. A **pgAdmin** database viewer at `localhost:5050`. |
+| **Booking assistant** | A **chat bubble** that knows the page you are on and can search and **book through conversation**, built on **FastMCP** (one tool server) and a **LangChain agent using `MultiServerMCPClient`** with the same Gemini model as the rest of the app. Reserve, pay and cancel need the traveller's explicit yes, **payment is refused in the same turn as reserving**, and a chat reservation shows up on **My trip** with its countdown. See section 5. |
 | **One-stop flights** | Travellers can book a flight **even when no direct flight connects two cities**. If a route exists through an intermediate city, the search offers it under **One-stop options** (for example Bengaluru → New Delhi → Jaipur). The second leg must leave the **same airport** the first lands at, 60 min to 6 h later. Both legs become one trip item and are **held in one atomic request under one timer**: a sold-out second leg leaves nothing held, and a connection can never be half-booked or oversold. Routes reachable only with a stop are also listed in the origin/date pickers. It is plain SQL over the same inventory, with no AI involved. |
-| **AI** | Flight natural-language search. A multi-model fallback chain. An offline heuristic parser for hotels and flights. The app asks for a missing city or origin instead of guessing, and explains empty results. Budget currency is inferred from the text. The parser used is shown and logged. |
+| **AI** | Flight natural-language search, including one-stop connections (the same results as the form search). A multi-model fallback chain. An offline heuristic parser for hotels and flights. The app asks for a missing city or origin instead of guessing, and explains empty results. Budget currency is inferred from the text. The parser used is shown and logged. |
 | **Resilience** | The expiry worker is safe with multiple instances (advisory lock). Failed compensation is retried and left in a visible `partially_confirmed` state. |
 
 ---
 
 ## 3. Architecture
+
+### Tech stack
+
+| Layer | Technology |
+|-------|-----------|
+| **Frontend** | React 18, Vite, plain CSS tokens, lucide icons, a History-API router, English/Hindi JSON locales |
+| **Backend** | Node 20, Express 5, zod validation, `pg`, a modular monolith (optionally clustered) |
+| **Database** | PostgreSQL 16 in Docker (pgAdmin optional), the canonical APS-05 schema plus additive migrations |
+| **AI** | Google Gemini (REST function calling) with a model fallback chain, and an offline heuristic parser |
+| **Assistant** | Python: FastMCP tool server, LangChain agent, `langchain-mcp-adapters` `MultiServerMCPClient`, FastAPI chat service |
+| **Proof** | Node test runner (66 tests), pytest (16), k6, GitHub Actions |
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -97,6 +109,20 @@ double-book, and a failed multi-item booking rolls back cleanly. The invariant w
 │  • CHECK booked ≥ 0, held ≥ 0 (added)        │
 │  • 41,855 seeded rows + our additive tables  │
 └──────────────────────────────────────────────┘
+```
+
+### Assistant path (chat)
+
+```
+Chat widget ──POST /api/chat {message, history, page context}──▶ Express API      (session check, validation)
+                                                                    │ {message, context, signed-in user}
+                                                                    ▼
+                                            agent/service.py (FastAPI) ── LangChain agent ── Gemini (same model + fallbacks)
+                                                                    │ MultiServerMCPClient · headers X-User-Id, X-Turn-Id
+                                                                    ▼
+                                            agent/mcp_server.py (FastMCP, streamable HTTP :8101)
+                                              read tools  ──▶ PostgreSQL (read-only connection, fixed SQL)
+                                              write tools ──▶ the booking API (atomic hold · idempotent booking · saga)
 ```
 
 ### Booking flow (as built)
@@ -144,7 +170,7 @@ canonical table or column is renamed, dropped or repurposed (rule R1). The APS-0
 |-------|---------------|
 | **`inventory_calendar`** | **The contended resource.** Every hold, confirm, cancel and expiry changes it under a row lock. |
 | **`holds`** | TTL reservations. The UNIQUE `idempotency_key` gives idempotent inserts. Expired and released rows are kept (R8). |
-| **`bookings`** | Saga header: `pending → confirmed \| failed \| partially_confirmed \| cancelled`. |
+| **`bookings`** | Saga header: `pending → confirmed \| failed \| partially_confirmed \| cancelled`. The canonical `channel` value `agent` marks bookings made through the chat assistant. |
 | **`booking_items`** | One line per hold. `status='compensated'` + `compensated_at` make a rollback auditable. |
 | **`payments`** | Mock payment: `initiated → captured → refunded`, or `failed` with a `failure_code`. |
 | **`hotels`**, **`hotel_room_types`**, **`hotel_rate_plans`**, **`cities`** | Hotel search. The room type is the bookable unit, and a rate plan's `price_delta` is priced into the booking. |
@@ -168,7 +194,7 @@ Applied by `npm run migrate` from `data-model/migrations/`, idempotent:
 | `CHECK (booked_units ≥ 0 AND held_units ≥ 0)` | new constraint | The canonical CHECK can't see a counter going negative. |
 | `idx_holds_active_expiry` | partial index | The expiry sweep scans only live holds. |
 | `kognivera_create_holds()` | function | Lock → check → insert → update in one call. |
-| `004_hub_flights.sql` | rows only | A daily schedule through New Delhi and Mumbai so one-stop itineraries can be demoed. |
+| `004_hub_flights.sql` | rows only | 2,680 demo flights (with fares and seat inventory), a daily schedule 24 Sep – 29 Nov through New Delhi and Mumbai, so one-stop itineraries can be demoed. The provided seed is untouched. |
 
 Full mapping and where each boundary rule is enforced and tested: [`data-model/DATA_MODEL.md`](data-model/DATA_MODEL.md).
 
@@ -180,7 +206,7 @@ Full mapping and where each boundary rule is enforced and tested: [`data-model/D
 
 | | |
 |---|---|
-| **What it does** | A query like *"3-star hotel in Jaipur for 2 adults, Oct 10-12, under ₹5000"*, *"जयपुर में 2 रातों के लिए होटल, ₹5000 से कम"* or *"Bengaluru to Jaipur on Nov 4, 2 seats"* returns bookable results. |
+| **What it does** | A query like *"3-star hotel in Jaipur for 2 adults, Oct 10-12, under ₹5000"*, *"जयपुर में 2 रातों के लिए होटल, ₹5000 से कम"* or *"Bengaluru to Jaipur on Nov 4, 2 seats"* returns bookable results, including **one-stop connections** for flights. The results page waits for what the AI understood, then shows the header and **filters already filled** with those details (no default values that change afterwards). |
 | **Mechanism** | Google **Gemini function calling** over REST. The tool schemas are `ai/prompts/search_hotels.tool.json` and `search_flights.tool.json`, with system prompts `search_system.md` and `search_flights_system.md`. The configured models are tried in turn (`GEMINI_MODEL` + `GEMINI_FALLBACK_MODELS`), 6 s timeout each. |
 | **How it is grounded** | The model **only fills search parameters**, and results come from the same SQL the form uses. The prompt receives the **live list of cities** from the database, and an answer naming any other city is rejected. Every result is a real `inventory_calendar` row with live availability. |
 | **When unsure** | It doesn't guess. A missing city returns `needs_clarification`. A missing flight origin comes back with the **real origins** for that destination. Zero results come with a reason (the city has no inventory, no match for the filters, no route, or no flights on that date) and alternatives. |
@@ -202,9 +228,31 @@ Full mapping and where each boundary rule is enforced and tested: [`data-model/D
 | 3 | **Heuristic** | An offline English parser for hotels and flights: cities + aliases (Goa → Panaji), date ranges, guests, stars, budget, preferences, and from/to roles. Free-text Hindi needs the key. |
 
 Every response reports `parser: cache | gemini | heuristic` and the model used. The UI shows it as a badge, and it
-is logged to `search_logs`. **No AI is on the booking path.** Holds, the saga and one-stop connections are plain SQL.
+is logged to `search_logs`. **No AI is inside the booking logic.** Holds, the saga and one-stop connections are plain SQL. The chat assistant (below) can *ask* the site to book, but only through the same API a click uses.
 
 Code: [`ai/search.js`](ai/search.js) · tests: `tests/ai.test.js`.
+
+### Booking assistant (chat, MCP)
+
+A chat bubble on every page for a signed-in traveller. It **knows what you are looking at** (page, URL filters, the hotel or booking open, the trip cart) and can
+**search and book through conversation**: "find the cheapest hotel in Jaipur from 6 Oct" → "reserve it" → "yes, pay by card". It understands the way people write cities ("Delhi" is New Delhi, "Bangalore" is Bengaluru), offers real nearby dates when a day has no flights, and answers in English or Hindi.
+
+| Piece | What it is |
+|---|---|
+| **MCP server** ([`agent/mcp_server.py`](agent/mcp_server.py)) | **FastMCP**. One server with every tool. Read tools are fixed SQL queries on a read-only database connection (cities, hotels, rooms, direct and one-stop flights, my bookings, my holds). Write tools (reserve, pay, release, cancel) call the booking API, so a chat booking gets the same atomic hold, idempotency and saga as a click. |
+| **MCP client + agent** ([`agent/assistant.py`](agent/assistant.py)) | LangChain `MultiServerMCPClient` loads the tools; a LangChain agent runs on the **same Gemini model** as the rest of the app (with the same fallback chain). |
+| **Chat service** ([`agent/service.py`](agent/service.py)) | FastAPI. The site's API (`POST /api/chat`) checks the session and forwards the question, the page snapshot and the traveller to it. |
+| **Widget** ([`frontend/src/components/ChatBot.jsx`](frontend/src/components/ChatBot.jsx)) | Floating chat, page-aware suggestions, "View my trip" / "View booking" buttons, English and Hindi. |
+
+**Safety, enforced in code and not just asked of the model:** the traveller's id reaches the tools as a request header the model cannot
+set, so it can only read and change that traveller's data. Reserve, pay and cancel need `user_confirmed=true`, and **paying is refused in
+the same turn as reserving**, so the traveller always sees the total (taxes included) and answers once more before anything is charged.
+A reservation the assistant makes shows up on **My trip** with its countdown (the page reads the traveller's live holds from `GET /api/holds`), so it can be paid there or in chat. Payments are the demo gateway. Details: [`agent/README.md`](agent/README.md).
+
+The tools: `list_cities`, `search_hotels`, `get_hotel_rooms`, `search_flights` (direct and one-stop), `get_my_bookings`, `get_booking`, `get_my_active_holds`, `reserve_trip`, `pay_and_confirm`, `release_holds`, `cancel_booking`.
+
+Run: `pip install -r agent/requirements.txt`, then `npm run agent` in `backend/` (starts the MCP server on `:8101` and the chat service on `:8100`) next to `npm start`. Without it the site works normally and chat answers *"the assistant is not available right now"*.
+Tests: `cd agent && python -m pytest` (16, needs the API running) and `tests/chat.test.js` (4).
 
 ---
 
@@ -215,6 +263,7 @@ Code: [`ai/search.js`](ai/search.js) · tests: `tests/ai.test.js`.
 | Step | Command | What it does |
 |------|---------|--------------|
 | **1. Database** | `docker compose up -d` | Postgres 16 on `localhost:5433` (db `kognivera`, user/pass `postgres`/`postgres`). |
+| **1b. DB browser (optional)** | opens with the same command | pgAdmin at http://localhost:5050 (no login), with the `kognivera` database pre-registered (tables such as `inventory_calendar`, `holds`, `bookings`). Demo credentials only. |
 | **2. Seed tools** | `pip install -r data-model/tools/requirements.txt` | psycopg for the loaders. |
 | **3. Schema** | `python data-model/tools/apply_schema.py --schema data-model/schema.sql` | Canonical DDL. |
 | **4. Seed** | `python data-model/tools/load_data.py --csv-dir data-model/seed/csv` | 20 CSVs, 41,855 rows. |
@@ -223,6 +272,7 @@ Code: [`ai/search.js`](ai/search.js) · tests: `tests/ai.test.js`.
 | **7. Migrate** | `npm run migrate` | Our additive migrations `001`–`004`. Idempotent. |
 | **8. Build UI** | `npm run build:web` | Builds `frontend/` into `frontend/dist`. |
 | **9. Start** | `npm start` | API + web app on one port. |
+| **9b. Assistant (optional)** | `pip install -r agent/requirements.txt`, then, in a second terminal, `cd backend && npm run agent` | The chat assistant: FastMCP tool server (`:8101`) and chat service (`:8100`). Needs the API running and `GEMINI_API_KEY`. It refuses to start if those ports are already taken. |
 | **10. Open** | **http://localhost:3000** | Health: `/api/health`. |
 
 Steps 3–4 need `DATABASE_URL` in the shell:
@@ -234,7 +284,7 @@ $env:DATABASE_URL="postgresql://postgres:postgres@localhost:5433/kognivera"     
 
 | Note | |
 |------|---|
-| **No Gemini key** | Everything else works. The five demo queries are pre-cached (paste one exactly), and other English queries use the heuristic parser. |
+| **No Gemini key** | Everything else works. The five demo queries are pre-cached (paste one exactly), and other English queries use the heuristic parser. The chat assistant needs the key. |
 | **UI development** | `cd frontend && npm run dev` serves on http://localhost:5173 and proxies `/api` to :3000. |
 | **Reset data** | `python data-model/tools/load_data.py --csv-dir data-model/seed/csv --truncate`, then `npm run migrate`. |
 | **Dates** | Seed inventory covers **2026-09-01 → 2026-11-29**, so search inside that window. "Goa" is stored as **Panaji**. |
@@ -251,7 +301,7 @@ The terminal outcome is a confirmed booking that survives concurrency, retries a
 |---|--------|-----------|----------------|
 | 1 | **Login** | Pick any of the 10 seeded travellers → **Sign in** | Identity for the session (no password). |
 | 2 | **Home** | **AI search** (the pill at the top-left of the Where box) → paste `जयपुर में 2 रातों के लिए होटल, ₹5000 से कम` | Hindi natural language → real rooms with live availability. The parser badge shows who answered. |
-| 3 | **Stay** | **View stay** on a hotel marked "Only N left" → pick room + rate plan → **Add to trip** | A draft: nothing is held and the inventory count is unchanged. |
+| 3 | **Stay** | **View stay** on a hotel marked "Only N left" → pick room + rate plan and the number of **Rooms** (capped at what is free) → **Add to trip** | A draft: nothing is held and the inventory count is unchanged. A fully booked category is shown as "Already booked". |
 | 4 | **My trip** | **Add a flight** → **Add to trip** → **Reserve for 10 min** | One atomic hold for hotel + flight with one shared countdown. **Pay now** unlocks only now. |
 | 5 | **My trip** | **Demo controls** → *Simulate a failure at checkout* → *Flight sells out (hotel is rolled back)* → **Fill test details** → **Pay now** | **Saga compensation.** The hotel line is compensated and restocked, so nothing is left half-booked. |
 | 6 | **My trip** | Reserve again → **Fill test details** → **Pay now** | A confirmed booking with a reference (the terminal outcome). |
@@ -263,17 +313,20 @@ The terminal outcome is a confirmed booking that survives concurrency, retries a
 **Optional scenarios**
 
 - **Two users, one room.** Tab A and tab B sign in as different travellers and add the same last-unit room. A clicks **Reserve** and succeeds. B clicks **Reserve** and is rejected with a sold-out message, and nothing is held. A third tab signs in as **Operations dashboard** to see live holds, who was rejected and **0 violations**. **Reset demo** restores stock.
-- **One-stop flights.** Flights → From Bengaluru, To Jaipur, 5 Oct → **One-stop options** (via New Delhi). Both legs are held in one atomic request, so a sold-out second leg leaves nothing held.
+- **Assistant.** Open the chat bubble on Explore: *"find the cheapest hotel in Jaipur for 1 night from 6 October"* → *"yes, reserve it"* (it holds the room and quotes the total with tax) → *"yes, pay with card"* → **View booking**. On a hotel page ask *"which rooms are free here?"*; on My bookings, *"cancel that booking"*.
+- **Abandoned reservation.** In **Demo controls** set the hold time to 15 s. User A reserves the last room; user B (who already has it in their trip) is refused while A's timer runs. When it ends, the hold expires, the stock returns, and B can reserve it. The Operations dashboard shows the hold go from Active to Expired with 0 violations. `npm run loadtest:mixed` does the same at scale.
+- **One-stop flights.** Flights → From Bengaluru, To Jaipur, 5 Oct → **One-stop options** (via New Delhi), from the form or from AI search. Both legs are held in one atomic request, so a sold-out second leg leaves nothing held.
+- **Many users at once.** `k6 run -e VUS=200 scripts/k6-loadtest.js` (from `backend/`) sends every request as a different traveller (`X-User-Id`); the backend log shows `user=…` for each.
 
 ---
 
 ## 8. Tests / Proof
 
-### Automated tests (60, against real Postgres)
+### Automated tests (66, against real Postgres)
 
 ```bash
 cd backend
-npm test            # 60 tests in ../tests/, ~16 s
+npm test            # 66 tests in ../tests/, ~17 s
                     # all pass with GEMINI_API_KEY blank; with a live key, 4 offline-fallback AI tests skip
 npm run invariants  # oversold / negative / held_drift / booked_drift — all must be 0
 ```
@@ -283,9 +336,10 @@ npm run invariants  # oversold / negative / held_drift / booked_drift — all mu
 | `holds.test.js` | 14 | **200 concurrent requests for the last 3 units → exactly 3 succeed, 197 sold out.** 25 simultaneous retries of one key → one hold. Atomic multi-night and trip holds. No deadlocks. TTL expiry. |
 | `bookings.test.js` | 15 | 20 simultaneous confirm retries → one booking. All three saga failure modes compensate. 12 simultaneous cancels restock once. FX and rate plans. 60 hold-then-book → exactly 3. |
 | `api.test.js` | 9 | The HTTP contract, Hindi errors, field-level 400s. **300 concurrent HTTP requests → exactly 3**, and sending every request 3× with the same key never double-books. |
-| `session.test.js` | 6 | Personas, isolation between users, **two users racing for the last unit** (one 201, one 409), operator-only endpoints, reset. |
+| `session.test.js` | 7 | Personas, isolation between users, **two users racing for the last unit** (one 201, one 409), operator-only endpoints, reset, and `GET /api/holds` (own live holds only, priced). |
+| `chat.test.js` | 4 | The assistant door: `POST /api/chat` needs a signed-in traveller, forwards the session user and page context (a body `user_id` cannot impersonate), rejects bad input, `503 assistant_unavailable` when the service is down. |
 | `connections.test.js` | 4 | Layover rules. Both legs held together, and a sold-out leg leaves nothing held. |
-| `ai.test.js` | 8 | Heuristic parsing, **grounded results**, asking instead of guessing, flight roles. |
+| `ai.test.js` | 9 | Heuristic parsing, **grounded results**, asking instead of guessing, flight roles, and **one-stop connections in AI flight search**. |
 | `errors.test.js` | 4 | Pool timeout or database down → `503 contention_timeout`, never a 500. |
 
 ### The hard-proof test: *"a load test that shows zero oversell"*
@@ -314,11 +368,13 @@ Measured on the dev machine: **3 granted · 497 sold_out · 0 errors, all PASS**
 |-------|-----|
 | In-app race with a live chart and verdict | **Load test** page · `POST /api/loadtests` |
 | Mixed confirm / abandoned-hold closing balance (fails if the expiry sweep is off) | `npm run loadtest:mixed` |
-| k6, with `teardown()` checking `/api/invariants` | `k6 run scripts/k6-loadtest.js` (from `backend/`) |
+| k6 with a **different user on every request**, and `teardown()` checking `/api/invariants` | `k6 run -e VUS=200 scripts/k6-loadtest.js` (from `backend/`; `-e SINGLE_USER=true` for the old single-user run) |
 | Idempotency after a dropped response | `node scripts/simulate-network-retry.mjs --runs 8 --abort-ms 5` |
 | From **separate machines** (GitHub Actions; needs a public URL) | `gh workflow run distributed-load-test.yml` · `distributed-idempotency-test.yml` · `network-retry-test.yml` |
 | Schema conformance | `python data-model/tools/validate_postgres.py --csv-dir data-model/seed/csv --conformance-script data-model/tools/validate_conformance.py` |
 | Saved k6 report | [`docs/evidence/k6-report.html`](docs/evidence/k6-report.html) |
+
+**Assistant (Python):** `cd agent && python -m pytest` runs 16 tests (needs the API running): every tool over real HTTP, SQL search agreeing with the site's own search (same hotels, prices and cheapest one-stop), the read-only database connection, traveller isolation, consent flags, payment only in a later turn than reserve, two travellers racing for the last room, city-name handling, and the agent wired to a scripted model.
 
 Test index: [`tests/README.md`](tests/README.md).
 
@@ -328,8 +384,10 @@ Test index: [`tests/README.md`](tests/README.md).
 
 ```
 README.md            this file                      .env.example        every variable, dummy values
-frontend/            React UI                       data-model/         schema, migrations, seed, DATA_MODEL.md
+frontend/            React UI + chat widget         data-model/         schema, migrations, seed, DATA_MODEL.md
 backend/             API, workers, load-test tools  ai/                 NL search: code + prompts
-tests/               automated tests                docs/               architecture, design, extras, demo script
-.github/workflows/   distributed proofs             docker-compose.yml  local Postgres
+agent/               booking assistant (Python):    tests/              automated tests (Node)
+                     FastMCP + LangChain agent      docs/               architecture, design, extras, demo script
+.github/workflows/   distributed proofs             docker-compose.yml  Postgres + pgAdmin
+docker/pgadmin/      pgAdmin server registration
 ```

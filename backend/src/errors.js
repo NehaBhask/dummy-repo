@@ -32,6 +32,11 @@ const CATALOGUE = {
     en: 'Sorry, that inventory is no longer available.',
     hi: 'क्षमा करें, यह इन्वेंटरी अब उपलब्ध नहीं है।',
   },
+  assistant_unavailable: {
+    status: 503,
+    en: 'The assistant is not available right now. You can still search and book on the site.',
+    hi: 'सहायक अभी उपलब्ध नहीं है। आप साइट पर खोज और बुकिंग जारी रख सकते हैं।',
+  },
   hold_expired: {
     status: 409,
     en: 'The hold has expired or was released. Please search again.',

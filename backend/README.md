@@ -12,7 +12,7 @@ docker compose up -d                 # repo root: Postgres on :5433 (already loa
 cd backend && npm install
 npm run migrate                      # additive tables/columns only (data-model/migrations/001_additions.sql), idempotent
 npm start                            # http://localhost:3000   (cp ../.env.example .env to configure)
-npm test                             # 60 tests (in ../tests/) against the real Postgres — see "Testing"
+npm test                             # 66 tests (in ../tests/) against the real Postgres — see "Testing"
 npm run invariants                   # the correctness queries; exit code 1 if any fail
 npm run loadtest -- --requests 500   # race 500 requests at a scarce row; run while `npm start` is up
 ```
@@ -249,12 +249,16 @@ No auth: requests without `user_id` act as the demo user (`GET /api/demo-user`).
 | `GET /api/search/flights` | `origin, destination, date, seats, cabin, max_price, currency, connections (default on), connections_limit` → direct `results` plus one-stop `connections` (`legs[2]`, `hub`, `layover_minutes`, `total_duration_minutes`, `stays[2]` to pass to `/holds` together) |
 | `POST /api/search/ai` | `{query, currency?}` English/Hindi → parsed params + results (+ summary with Gemini). `parser` says who answered |
 | `POST /api/holds` | **`Idempotency-Key` header required.** `{items:[{inventory_id,units} \| {entity_type,entity_id,for_date,nights,units}], ttl_seconds?}` → `201` (or `200` + `Idempotent-Replayed: true`). `409 sold_out` |
+| `GET /api/holds` | the signed-in traveller's **live** reservations, described and priced (`?currency=`); the trip page merges them, so holds made by the chat assistant show up |
 | `GET /api/holds/:id` · `POST /api/holds/:id/release` | hold + `seconds_remaining` (for the countdown) |
 | `POST /api/bookings` | **`Idempotency-Key` required.** `{hold_ids \| items:[{hold_id,rate_plan_id?}], currency?, payment:{method}, simulate_failure?}` → `201` confirmed, `200` replay, or on saga failure `409/402` with `error.rolled_back:true` **and the compensated booking** |
 | `GET /api/bookings?user_id&status` · `GET /api/bookings/:id` | My Bookings |
 | `POST /api/bookings/:id/cancel` | restocks; idempotent |
 | `POST /api/loadtests` | `{inventory_id?, concurrent_requests≤1000, units_per_request, duplicate_factor≤5, mode:"api"\|"direct", cleanup, bypass_shield (default true), wait}` → `202` run; poll `GET /api/loadtests/:id` (live counters, latency percentiles, `timeline[]`, then `verdict`, `histogram`). `GET /api/loadtests` lists runs |
 | `GET /api/inventory/contended` | scarce rows to race (starter query #1) |
+| `GET /api/personas` · `GET /api/users/ids?limit=N` | the 10 login personas · active user ids (the k6 script sends each request as a different `X-User-Id`) |
+| `GET /api/ops/summary` · `POST /api/ops/reset-demo` | operator only: holds, bookings, inventory, invariants, activity feed · undo the demo users' own holds and bookings |
+| `POST /api/chat` | booking assistant: session-checked proxy to `agent/` (`{message, history[], context}` → `{reply, steps, actions}`); `503 assistant_unavailable` when it is down |
 | `GET /api/invariants` · `/api/health` · `/api/metrics` | proof / status |
 
 Demo saga failure: hold a room and a flight, then `POST /api/bookings` with `"simulate_failure":"flight"`

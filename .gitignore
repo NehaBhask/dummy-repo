@@ -15,3 +15,4 @@ backend/k6-run.*
 backend/result_*.json
 *.log
 .DS_Store
+.pytest_cache/

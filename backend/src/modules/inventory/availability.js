@@ -6,16 +6,18 @@ const DESCRIBE_SQL = `
          ic.total_units, ic.booked_units, ic.held_units,
          (ic.total_units - ic.booked_units - ic.held_units) AS free_units,
          ic.price, ic.currency,
-         rt.name AS room_name, h.hotel_id, h.name AS hotel_name,
+         rt.name AS room_name, h.hotel_id, h.name AS hotel_name, hc.name AS hotel_city,
          ff.cabin_class, ff.fare_class, f.flight_number,
-         oa.iata AS origin_iata, da.iata AS dest_iata
+         oa.iata AS origin_iata, da.iata AS dest_iata, dcity.name AS dest_city
     FROM inventory_calendar ic
     LEFT JOIN hotel_room_types rt ON ic.entity_type = 'room_type'   AND rt.room_type_id = ic.entity_id
     LEFT JOIN hotels h            ON h.hotel_id = rt.hotel_id
+    LEFT JOIN cities hc           ON hc.city_id = h.city_id
     LEFT JOIN flight_fares ff     ON ic.entity_type = 'flight_fare' AND ff.fare_id = ic.entity_id
     LEFT JOIN flights f           ON f.flight_id = ff.flight_id
     LEFT JOIN airports oa         ON oa.airport_id = f.origin_airport_id
     LEFT JOIN airports da         ON da.airport_id = f.dest_airport_id
+    LEFT JOIN cities dcity        ON dcity.city_id = da.city_id
    WHERE ic.inventory_id = ANY($1::text[])`;
 
 /** Read-only (unlocked) inventory rows with human-readable context. Never use for decisions. */

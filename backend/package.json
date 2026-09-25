@@ -13,6 +13,7 @@
     "start:cluster": "node src/cluster.js",
     "dev": "node --watch src/index.js",
     "migrate": "node scripts/migrate.js",
+    "agent": "python ../agent/run.py",
     "invariants": "node scripts/invariants.js",
     "loadtest": "node scripts/loadtest.js",
     "loadtest:mixed": "node scripts/mixed-loadtest.mjs",

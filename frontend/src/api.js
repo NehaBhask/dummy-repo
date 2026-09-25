@@ -52,6 +52,8 @@ export const newKey = (prefix) => `${prefix}_${crypto.randomUUID()}`;
 export const api = {
   meta: () => get('/api/meta'),
   personas: () => get('/api/personas'),
+  chat: (body) => request('POST', '/api/chat', { body }),
+  holds: (currency) => get('/api/holds', { currency }),
   opsSummary: (inventoryId) => get('/api/ops/summary', { inventory_id: inventoryId }),
   resetDemo: async () => (await request('POST', '/api/ops/reset-demo', { body: {} })).data,
   cities: () => get('/api/cities'),

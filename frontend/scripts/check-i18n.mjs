@@ -38,6 +38,7 @@ const dynamic = {
   'lt.inv': ['oversold','negative','held_drift','booked_drift'],
   'pay.err': ['number','name','expiry','cvv','upi'],
   'ops.kind': ['hold','booking','rejected'],
+  'chat.page': ['explore','hotel_search','flight_search','hotel','trip','bookings','confirmation','visualizer','loadtest'],
 };
 for (const [p, vals] of Object.entries(dynamic)) for (const v of vals) for (const [n, d] of [['en', en], ['hi', hi]]) if (!(`${p}.${v}` in d)) problems.push(`missing in ${n}: ${p}.${v}`);
 console.log(`${used.size} static keys used, ${Object.keys(en).length} en / ${Object.keys(hi).length} hi entries`);

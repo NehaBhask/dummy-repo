@@ -140,3 +140,38 @@ test('reset demo: releases the active holds a user made through the app and rest
   assert.equal((await readInventory(inv.inventory_id)).held_units, 0);
   assert.deepEqual(await seedRows(), seedBefore, 'the provided seed holds were not touched');
 });
+
+test('GET /api/holds: the traveller sees their own live reservations (however made), described and priced; nobody else does', async () => {
+  const [a, b] = [alice, bob];
+  const inv = await makeInventory({ total: 3, type: 'room_type', price: '1000.00' });
+  const mine = await hold(a, inv.inventory_id, 2);
+  assert.equal(mine.status, 201);
+  const theirs = await makeInventory({ total: 2, type: 'room_type' });
+  assert.equal((await hold(b, theirs.inventory_id, 1)).status, 201);
+
+  const list = await call('GET', '/api/holds', undefined, as(a));
+  assert.equal(list.status, 200);
+  const row = list.body.holds.find((h) => h.hold_id === mine.body.holds[0].hold_id);
+  assert.ok(row, 'own hold is listed');
+  assert.equal(row.status, 'active');
+  assert.equal(row.units, 2);
+  assert.ok(row.seconds_remaining > 0);
+  assert.equal(row.inventory.entity_type, 'room_type');
+  assert.ok(row.inventory.title.includes('@'), 'described as room @ hotel');
+  assert.ok(row.inventory.hotel_city, 'with its city');
+  assert.equal(row.price.amount, '2000.00', 'price x units, in the row currency');
+  assert.ok(list.body.holds.every((h) => h.user_id === a.user_id), "never anyone else's hold");
+
+  // priced in another currency on request
+  const usd = await call('GET', '/api/holds?currency=USD', undefined, as(a));
+  assert.equal(usd.body.holds.find((h) => h.hold_id === row.hold_id).price.currency, 'USD');
+
+  // released holds drop off the list
+  await call('POST', `/api/holds/${row.hold_id}/release`, {}, as(a));
+  const after = await call('GET', '/api/holds', undefined, as(a));
+  assert.ok(!after.body.holds.some((h) => h.hold_id === row.hold_id));
+
+  // no session: nothing to list
+  const anon = await call('GET', '/api/holds');
+  assert.equal(anon.status, 401);
+});

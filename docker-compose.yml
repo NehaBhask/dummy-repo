@@ -17,5 +17,29 @@ services:
       timeout: 5s
       retries: 5
 
+  # Web UI for the database: http://localhost:5050 (no login; the server is pre-registered).
+  # Demo credentials only, same as the postgres service above.
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: kognivera-pgadmin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@kognivera.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:80"
+    user: root
+    entrypoint: /bin/sh -c "cp /pgpass.src /pgpass && chmod 600 /pgpass && chown pgadmin:root /pgpass && exec /entrypoint.sh"
+    volumes:
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+      - ./docker/pgadmin/pgpass:/pgpass.src:ro
+      - kognivera_pgadmin:/var/lib/pgadmin
+
 volumes:
   kognivera_pgdata:
+  kognivera_pgadmin:

@@ -6,6 +6,7 @@ import { useSession } from './session.jsx';
 import { useTrip } from './trip.jsx';
 import { Link, matchPath, useRouter } from './router.jsx';
 import { Countdown, Empty, Spinner } from './components/ui.jsx';
+import ChatBot from './components/ChatBot.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import HomePage from './pages/HomePage.jsx';
 import SearchPage from './pages/SearchPage.jsx';
@@ -221,6 +222,7 @@ export default function App() {
         )}
       </main>
       <footer className="footer">{t('footer.tagline')}</footer>
+      {session.role === 'traveller' && <ChatBot key={session.user_id} />}
       <Toasts />
     </div>
   );

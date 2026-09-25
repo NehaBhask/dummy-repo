@@ -5,7 +5,7 @@ import { AppError, localise, metrics, statusOf } from './errors.js';
 import { convert, fxContext } from './fx.js';
 import { money } from './money.js';
 import {
-  aiSearchBody, bookingBody, cancelBody, flightQuery, holdBody, hotelQuery, idempotencyKey, loadTestBody, parse,
+  aiSearchBody, bookingBody, chatBody, cancelBody, flightQuery, holdBody, hotelQuery, idempotencyKey, loadTestBody, parse,
 } from './validation.js';
 import { demoUser } from './modules/users.js';
 import { listPersonas, operatorOnly } from './modules/session.js';
@@ -13,7 +13,7 @@ import { opsSummary, recordRejection, resetDemo } from './modules/ops.js';
 import { checkInvariants } from './modules/invariants.js';
 import { getInventory, resolveHoldItems } from './modules/inventory/availability.js';
 import { findContendedInventory, flightRoutes, searchFlights, searchHotels } from './modules/inventory/search.js';
-import { createHold, getHold, releaseHold } from './modules/booking/holds.js';
+import { createHold, getHold, listActiveHolds, releaseHold } from './modules/booking/holds.js';
 import { cancelBooking, confirmBooking, getBooking, listBookings } from './modules/booking/bookings.js';
 import { aiFlightSearch, aiSearch } from '../../ai/search.js';
 import { getRun, listRuns, publicRun, runLoadTest, startLoadTest } from './modules/loadtest/engine.js';
@@ -62,6 +62,35 @@ export function buildRouter({ worker } = {}) {
     const { rows } = await pool.query(`SELECT user_id FROM users WHERE status = 'active' ORDER BY user_id LIMIT $1`, [limit]);
     res.json({ user_ids: rows.map((u) => u.user_id) });
   });
+  // Booking assistant. The website's API stays the only public door: it checks the session, then forwards the
+  // question, the page snapshot and the signed-in traveller to the assistant service (agent/). That service reaches
+  // the database through its MCP tools; the traveller id travels as a header the model cannot change.
+  r.post('/chat', async (req, res) => {
+    if (!req.session || req.session.role !== 'traveller') throw new AppError('login_required');
+    const b = parse(chatBody, req.body);
+    let answer;
+    try {
+      const upstream = await fetch(`${config.agentUrl}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          message: b.message,
+          history: b.history,
+          context: b.context,
+          lang: req.lang === 'hi' ? 'hi' : 'en',
+          user: { user_id: req.session.user_id, display_name: req.session.display_name, home_currency: req.session.home_currency },
+        }),
+        signal: AbortSignal.timeout(config.agentTimeoutMs),
+      });
+      if (!upstream.ok) throw new Error(`assistant answered ${upstream.status}`);
+      answer = await upstream.json();
+    } catch (err) {
+      console.error('[assistant]', err.message);
+      throw new AppError('assistant_unavailable');
+    }
+    res.json(answer);
+  });
+
   r.get('/ops/summary', operatorOnly, async (req, res) => res.json(await opsSummary({ inventoryId: req.query.inventory_id ?? null })));
   r.post('/ops/reset-demo', operatorOnly, async (_req, res) => res.json(await resetDemo()));
 
@@ -81,6 +110,7 @@ export function buildRouter({ worker } = {}) {
       user: req.session ?? (await demoUser()),
       role: req.session?.role ?? null,
       ai_search: { enabled: Boolean(config.gemini.apiKey), fallback: 'english-only heuristic' },
+      assistant: { enabled: Boolean(config.gemini.apiKey) },
       demo_controls: config.faultInjection, // fault injection + short hold TTLs are offered only outside production
       hold_ttl_seconds: config.holdTtlSeconds,
     });
@@ -169,6 +199,12 @@ export function buildRouter({ worker } = {}) {
         expires_at: out.holds.map((h) => h.expires_at).sort()[0],
         holds: out.holds,
       });
+  });
+  // The signed-in traveller's live reservations, however they were made (the site or the chat assistant): what the trip page shows.
+  r.get('/holds', async (req, res) => {
+    const userId = viewer(req);
+    if (!userId) throw new AppError('login_required');
+    res.json({ holds: await listActiveHolds({ userId, currency: req.query.currency }) });
   });
   r.get('/holds/:id', async (req, res) => res.json(await getHold(req.params.id, { userId: viewer(req) })));
   r.post('/holds/:id/release', async (req, res) => {

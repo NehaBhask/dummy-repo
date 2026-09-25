@@ -82,6 +82,25 @@ test('flight heuristic parser: from/to roles, aliases, seats and dates', () => {
   assert.equal(parseFlightHeuristic('flights to Agra', today, names).origin, undefined, 'a missing origin is not invented');
 });
 
+test('aiFlightSearch: a route that only exists with one stop returns its connections (same as the form search)', async (t) => {
+  if (config.gemini.apiKey) return t.skip('a live Gemini key is configured; this test targets the offline path');
+  // Bengaluru -> Jaipur has no direct flight on 5 Oct in the seed, but the hub schedule (migration 004) connects it via Delhi/Mumbai.
+  const res = await aiFlightSearch({ query: 'flight from Bengaluru to Jaipur on 2026-10-05 for 1 seat' });
+  assert.equal(res.parser, 'heuristic');
+  assert.deepEqual([res.search_params.origin, res.search_params.destination, res.search_params.date], ['Bengaluru', 'Jaipur', '2026-10-05']);
+  assert.equal(res.total, 0, 'no direct flight that day');
+  assert.ok(res.connections.length > 0, 'but one-stop options are returned');
+  assert.equal(res.no_results_reason, undefined, 'and it does not claim there is nothing');
+  for (const c of res.connections) {
+    assert.equal(c.legs[0].flight.origin.city, 'Bengaluru');
+    assert.equal(c.legs[1].flight.destination.city, 'Jaipur');
+    assert.equal(c.legs[0].flight.destination.iata, c.legs[1].flight.origin.iata, 'same airport');
+    assert.ok(c.layover_minutes >= 60 && c.layover_minutes <= 360);
+    assert.equal(c.stays.length, 2);
+  }
+  await pool.query(`DELETE FROM search_logs WHERE raw_query LIKE 'flight from Bengaluru to Jaipur%'`);
+});
+
 test('aiFlightSearch: real route returns grounded flights; a missing origin asks instead of guessing', async (t) => {
   if (config.gemini.apiKey) return t.skip('a live Gemini key is configured; this test targets the offline path');
   const [route] = await flightRoutes();

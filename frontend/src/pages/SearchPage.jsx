@@ -35,6 +35,24 @@ function TypeSwitch({ type, setQuery }) {
   );
 }
 
+/** Shown while an AI search is still being read, instead of the page with default values (Jaipur, today) that would then change. */
+function AiPending({ q }) {
+  const { t } = useI18n();
+  return (
+    <>
+      <div className="results-head">
+        <div>
+          <p className="eyebrow">{t('search.aiWorking')}</p>
+          <h1 className="ai-query">“{q}”</h1>
+        </div>
+      </div>
+      <Skeleton h={130} />
+      <Skeleton h={130} />
+      <Skeleton h={130} />
+    </>
+  );
+}
+
 /* ------------------------------- hotels -------------------------------- */
 
 function HotelResults({ params, setQuery }) {
@@ -123,6 +141,8 @@ function HotelResults({ params, setQuery }) {
   // Editing any filter turns an AI search into a normal one that starts from what the AI understood.
   const update = (patch) => setQuery({ q: '', ...serialise(eff), ...patch }, { replace: !q, scroll: false });
 
+  if (q && !ai && status !== 'error') return <AiPending q={q} />; // wait for what the AI understood before drawing the page
+
   const total = data?.total ?? 0;
   const out = addDaysISO(eff.check_in, eff.nights);
   const cities = bookable.length ? bookable : [{ name: eff.city }];
@@ -183,7 +203,7 @@ function HotelResults({ params, setQuery }) {
                 type="range"
                 min={bounds.lo}
                 max={bounds.hi}
-                step={Math.max(1, Math.round((bounds.hi - bounds.lo) / 60))}
+                step={[1, 5, 10, 25, 50, 100].find((n) => (bounds.hi - bounds.lo) / n <= 150) ?? 100}
                 value={eff.max_price || bounds.hi}
                 onChange={(e) => update({ max_price: Number(e.target.value) >= bounds.hi ? '' : e.target.value })}
               />
@@ -399,9 +419,11 @@ function FlightResults({ params, setQuery }) {
   const destination = q ? (sp.destination ?? params.destination ?? 'Jaipur') : (params.destination ?? 'Jaipur');
   const seats = q ? (sp.seats ?? 1) : Math.max(1, Number(params.seats) || 1);
   const routes = useFlightRoutes(destination);
-  const origin = q ? (sp.origin ?? '') : (params.origin && routes?.some((r) => r.origin === params.origin) ? params.origin : (routes?.[0]?.origin ?? ''));
+  // The origin and date the traveller searched for are already in the URL: show them straight away and only correct them if the
+  // route list (loaded a moment later) says that origin does not fly here.
+  const origin = q ? (sp.origin ?? '') : (params.origin && (!routes || routes.some((r) => r.origin === params.origin)) ? params.origin : (routes?.[0]?.origin ?? ''));
   const route = routes?.find((r) => r.origin === origin);
-  const day = q ? (ai?.needs_clarification ? '' : (sp.date ?? '')) : pickDate(route?.dates, params.date, meta.today);
+  const day = q ? (ai?.needs_clarification ? '' : (sp.date ?? '')) : (routes ? pickDate(route?.dates, params.date, meta.today) : (params.date ?? ''));
 
   // Editing any field turns an AI search into a normal one that starts from what the AI understood.
   const update = (patch) => setQuery(q ? { q: '', type: 'flights', destination, origin, date: day, seats, ...patch } : patch);
@@ -469,8 +491,9 @@ function FlightResults({ params, setQuery }) {
   const status = q ? aiState.status : state.status;
   const error = q ? aiState.error : state.error;
   const results = q ? (ai?.results ?? []) : (state.data?.results ?? []);
-  const connections = q ? [] : (state.data?.connections ?? []);
+  const connections = q ? (ai?.connections ?? []) : (state.data?.connections ?? []);
   const cities = bookable.length ? bookable : [{ name: destination }];
+  if (q && !ai && aiState.status !== 'error') return <AiPending q={q} />;
 
   return (
     <>
@@ -496,6 +519,7 @@ function FlightResults({ params, setQuery }) {
           <span className="field-label">{t('trip.flyFrom')}</span>
           <select className="input" value={origin} disabled={!routes?.length} onChange={(e) => update({ origin: e.target.value, date: '' })}>
             {!origin && <option value="">—</option>}
+            {origin && !(routes ?? []).some((r) => r.origin === origin) && <option value={origin}>{origin}</option>}
             {(routes ?? []).map((r) => <option key={r.origin} value={r.origin}>{r.origin}</option>)}
           </select>
         </label>
@@ -503,6 +527,7 @@ function FlightResults({ params, setQuery }) {
           <span className="field-label">{t('trip.flyDate')}</span>
           <select className="input" value={day} disabled={!route} onChange={(e) => update({ date: e.target.value })}>
             {!day && <option value="">—</option>}
+            {day && !(route?.dates ?? []).includes(day) && <option value={day}>{date(day)}</option>}
             {(route?.dates ?? []).map((d) => <option key={d} value={d}>{date(d)}</option>)}
           </select>
         </label>
